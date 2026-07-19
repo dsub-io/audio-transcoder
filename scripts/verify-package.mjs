@@ -2,7 +2,22 @@ import { readFile } from 'node:fs/promises';
 
 const packageJsonUrl = new URL('../package.json', import.meta.url);
 const packageJson = JSON.parse(await readFile(packageJsonUrl, 'utf8'));
+const licenseText = await readFile(
+  new URL('../LICENSE.md', import.meta.url),
+  'utf8',
+);
 const publicApi = await import('../dist/index.js');
+
+if (
+  packageJson.author !== 'dsub.io' ||
+  packageJson.license !== 'SEE LICENSE IN LICENSE.md' ||
+  !licenseText.startsWith(
+    'Required Notice: Copyright 2026 dsub.io. All rights reserved.',
+  ) ||
+  !licenseText.includes('# PolyForm Noncommercial License 1.0.0')
+) {
+  throw new Error('Package ownership and license metadata must agree');
+}
 
 if (
   packageJson.exports?.['./worker']?.import !== './dist/worker/entry.js' ||
