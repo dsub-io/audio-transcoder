@@ -1,0 +1,35 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify release token
+        env:
+          RELEASE_GITHUB_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          if [ -z "${RELEASE_GITHUB_TOKEN}" ]; then
+            echo "GH_TOKEN secret is required for Release Please to create pull requests, tags, and releases." >&2
+            exit 1
+          fi
+
+      - id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

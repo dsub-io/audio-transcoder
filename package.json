@@ -1,0 +1,36 @@
+{
+  "name": "@dsub/audio-transcoder",
+  "version": "0.0.1",
+  "description": "Browser-local audio inspection and transcoding engine for dsub tools.",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dsub-io/audio-transcoder.git"
+  },
+  "engines": {
+    "node": "^22.22.0 || >=24.11.0"
+  },
+  "packageManager": "pnpm@11.9.0",
+  "files": [
+    "README.md",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm package:smoke",
+    "package:smoke": "pnpm pack --dry-run",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vitest": "^4.1.9"
+  }
+}
+
