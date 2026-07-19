@@ -3,6 +3,10 @@
   "version": "0.0.1",
   "description": "Browser-local audio inspection and transcoding engine for dsub tools.",
   "type": "module",
+  "types": "./dist/index.d.ts",
+  "sideEffects": [
+    "./dist/worker/entry.js"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/dsub-io/audio-transcoder.git"
@@ -11,26 +15,36 @@
     "node": "^22.22.0 || >=24.11.0"
   },
   "packageManager": "pnpm@11.9.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "README.md",
+    "docs",
     "dist"
   ],
   "scripts": {
-    "build": "tsc --project tsconfig.build.json",
-    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm package:smoke",
-    "package:smoke": "pnpm pack --dry-run",
-    "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "build": "pnpm generate:metadata && node ./scripts/clean-dist.mjs && tsc --project tsconfig.build.json",
+    "check": "pnpm typecheck && pnpm test:coverage && pnpm package:smoke",
+    "generate:metadata": "node ./scripts/generate-package-metadata.mjs",
+    "package:smoke": "pnpm build && node ./scripts/verify-package.mjs && pnpm pack --dry-run",
+    "test": "pnpm generate:metadata && vitest run",
+    "test:coverage": "pnpm generate:metadata && vitest run --coverage",
+    "typecheck": "pnpm generate:metadata && tsc --noEmit"
   },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker/entry.d.ts",
+      "import": "./dist/worker/entry.js"
     }
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.10",
     "typescript": "6.0.3",
     "vitest": "^4.1.9"
   }
 }
-
