@@ -188,3 +188,12 @@ publication. Validation and release creation run on dsub self-hosted runners;
 the OIDC publish job alone runs on a GitHub-hosted runner. Enable it only after
 `@dsub/audio-transcoder` trusts `.github/workflows/release.yml` on npmjs.com by
 setting the repository variable `NPM_TRUSTED_PUBLISHING_ENABLED=true`.
+
+## License
+
+Required Notice: Copyright 2026 dsub.io. All rights reserved.
+
+This software is source-available under the
+[PolyForm Noncommercial License 1.0.0](LICENSE.md). Use, modification, and
+redistribution are permitted only for noncommercial purposes. Commercial use
+is prohibited.

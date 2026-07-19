@@ -2,6 +2,8 @@
   "name": "@dsub/audio-transcoder",
   "version": "0.0.1",
   "description": "Browser-local audio inspection and transcoding engine for dsub tools.",
+  "author": "dsub.io",
+  "license": "SEE LICENSE IN LICENSE.md",
   "type": "module",
   "types": "./dist/index.d.ts",
   "sideEffects": [
