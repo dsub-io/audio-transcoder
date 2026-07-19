@@ -16,7 +16,9 @@ concurrency:
 
 jobs:
   release-please:
-    runs-on: ubuntu-latest
+    runs-on:
+      group: dsub-ci
+      labels: [self-hosted, linux, x64]
     steps:
       - name: Verify release token
         env:
