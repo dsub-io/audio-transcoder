@@ -6,6 +6,7 @@ import {
   type AudioOutputPreset,
   type PcmAudio,
 } from '../index.js';
+import { AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES } from '../engine/buffer-policy.js';
 import { aiffDecoder, aiffEncoder, aiffInspector } from './aiff.js';
 import { writeAscii, writeExtended80 } from './binary.js';
 import { wavDecoder, wavEncoder, wavInspector } from './wav.js';
@@ -70,8 +71,10 @@ describe('built-in WAV and AIFF codecs', () => {
     const input = { data: new Uint8Array([1, 2, 3]).buffer };
 
     expect(wavInspector.inspect(input)).toBeNull();
+    expect(wavDecoder.estimateDecodedPcm?.(input)).toBeNull();
     await expect(wavDecoder.decode(input)).resolves.toBeNull();
     expect(aiffInspector.inspect(input)).toBeNull();
+    expect(aiffDecoder.estimateDecodedPcm?.(input)).toBeNull();
     await expect(aiffDecoder.decode(input)).resolves.toBeNull();
   });
 
@@ -85,6 +88,43 @@ describe('built-in WAV and AIFF codecs', () => {
       expect.objectContaining({ code: 'UNSUPPORTED_OUTPUT' }),
     );
   });
+
+  it.each([
+    [
+      'WAV',
+      () =>
+        createWav({
+          bitDepth: 8,
+          blockAlign: 1,
+          payload: new Uint8Array(EXPANDING_PCM_FRAMES),
+        }),
+    ],
+    [
+      'AIFF',
+      () =>
+        createAiff({
+          bitDepth: 8,
+          frames: EXPANDING_PCM_FRAMES,
+          payload: new Uint8Array(EXPANDING_PCM_FRAMES),
+        }),
+    ],
+  ] as const)(
+    'rejects a sub-limit %s source that expands past the PCM limit',
+    async (container, createInput) => {
+      const data = createInput();
+      const estimate = await (container === 'WAV'
+        ? wavDecoder.estimateDecodedPcm?.({ data })
+        : aiffDecoder.estimateDecodedPcm?.({ data }));
+
+      expect(data.byteLength).toBeLessThan(
+        AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES,
+      );
+      expect(estimate).toEqual({ channels: 1, frames: EXPANDING_PCM_FRAMES });
+      await expect(engine.decode({ data })).rejects.toMatchObject({
+        code: 'RESOURCE_LIMIT_EXCEEDED',
+      });
+    },
+  );
 });
 
 describe('WAV malformed and extended inputs', () => {
@@ -118,6 +158,19 @@ describe('WAV malformed and extended inputs', () => {
       formatChunkSize: 40,
       formatTag: 0xfffe,
     });
+    const extensibleFloat = createWav({
+      bitDepth: 32,
+      blockAlign: 4,
+      extensibleSubformat: 3,
+      formatChunkSize: 40,
+      formatTag: 0xfffe,
+      payload: new Uint8Array(4),
+    });
+    const extensibleUnsupported = createWav({
+      extensibleSubformat: 2,
+      formatChunkSize: 40,
+      formatTag: 0xfffe,
+    });
 
     expect(wavInspector.inspect({ data: unknown })).toMatchObject({
       codec: 'WAVE format 2',
@@ -128,6 +181,39 @@ describe('WAV malformed and extended inputs', () => {
     );
     expect(wavInspector.inspect({ data: extensible })?.codec).toBe('PCM integer');
     await expect(wavDecoder.decode({ data: extensible })).resolves.not.toBeNull();
+    expect(wavInspector.inspect({ data: extensibleFloat })?.codec).toBe(
+      'PCM float',
+    );
+    await expect(wavDecoder.decode({ data: extensibleFloat })).resolves.not.toBeNull();
+    expect(wavInspector.inspect({ data: extensibleUnsupported })).toMatchObject({
+      codec: 'WAVE format 65534',
+      decodeSupport: 'browser-dependent',
+    });
+  });
+
+  it('does not overclaim malformed WAVE extensible subformats', async () => {
+    const mismatchedDepth = createWav({
+      extensibleSubformat: 1,
+      extensibleValidBitDepth: 8,
+      formatChunkSize: 40,
+      formatTag: 0xfffe,
+    });
+    const invalidGuid = createWav({
+      extensibleSubformat: 1,
+      formatChunkSize: 40,
+      formatTag: 0xfffe,
+      invalidExtensibleGuid: true,
+    });
+
+    for (const data of [mismatchedDepth, invalidGuid]) {
+      expect(wavInspector.inspect({ data })).toMatchObject({
+        codec: 'WAVE format 65534',
+        decodeSupport: 'browser-dependent',
+      });
+      await expect(engine.decode({ data })).rejects.toMatchObject({
+        code: 'UNSUPPORTED_INPUT',
+      });
+    }
   });
 
   it.each([
@@ -139,6 +225,9 @@ describe('WAV malformed and extended inputs', () => {
     const data = createWav();
     new DataView(data).setUint16(offset, 0, true);
 
+    expect(wavInspector.inspect({ data })?.decodeSupport).toBe(
+      'browser-dependent',
+    );
     await expect(wavDecoder.decode({ data })).rejects.toThrowError(
       expect.objectContaining({ code: 'INVALID_AUDIO_DATA' }),
     );
@@ -178,6 +267,37 @@ describe('WAV malformed and extended inputs', () => {
     await expect(wavDecoder.decode({ data: fortyBit })).rejects.toThrowError(
       expect.objectContaining({ code: 'UNSUPPORTED_INPUT' }),
     );
+    expect(wavInspector.inspect({ data: fortyBit })?.decodeSupport).toBe(
+      'browser-dependent',
+    );
+  });
+
+  it('supports float64 WAV and rejects unsupported float widths', async () => {
+    const float64 = createWav({
+      bitDepth: 64,
+      blockAlign: 8,
+      formatTag: 3,
+      payload: new Uint8Array(8),
+    });
+    const float16 = createWav({
+      bitDepth: 16,
+      blockAlign: 2,
+      formatTag: 3,
+      payload: new Uint8Array(2),
+    });
+
+    expect(wavInspector.inspect({ data: float64 })?.decodeSupport).toBe(
+      'built-in',
+    );
+    await expect(engine.decode({ data: float64 })).resolves.toMatchObject({
+      source: 'WAV PCM decoder',
+    });
+    expect(wavInspector.inspect({ data: float16 })?.decodeSupport).toBe(
+      'browser-dependent',
+    );
+    await expect(engine.decode({ data: float16 })).rejects.toMatchObject({
+      code: 'UNSUPPORTED_INPUT',
+    });
   });
 
   it('rejects RIFF data that is not WAVE', () => {
@@ -239,6 +359,19 @@ describe('AIFF malformed and compressed inputs', () => {
     );
   });
 
+  it('rejects AIFC without a compression type', async () => {
+    const data = createAiff({ commonChunkSize: 18, formType: 'AIFC' });
+
+    expect(aiffInspector.inspect({ data })).toMatchObject({
+      codec: 'Unknown compression',
+      decodeSupport: 'browser-dependent',
+      notes: ['AIFC COMM compression type was not found.'],
+    });
+    await expect(engine.decode({ data })).rejects.toMatchObject({
+      code: 'INVALID_AUDIO_DATA',
+    });
+  });
+
   it.each([
     ['channels', 20, 'uint16'],
     ['sample rate', 28, 'extended'],
@@ -252,6 +385,9 @@ describe('AIFF malformed and compressed inputs', () => {
       view.setUint16(offset, 0, false);
     }
 
+    expect(aiffInspector.inspect({ data })?.decodeSupport).toBe(
+      'browser-dependent',
+    );
     await expect(aiffDecoder.decode({ data })).rejects.toThrowError(
       expect.objectContaining({ code: 'INVALID_AUDIO_DATA' }),
     );
@@ -269,6 +405,20 @@ describe('AIFF malformed and compressed inputs', () => {
     );
   });
 
+  it('rejects unsupported byte-aligned AIFF sample widths', async () => {
+    const data = createAiff({
+      bitDepth: 40,
+      payload: new Uint8Array(5),
+    });
+
+    expect(aiffInspector.inspect({ data })?.decodeSupport).toBe(
+      'browser-dependent',
+    );
+    await expect(engine.decode({ data })).rejects.toMatchObject({
+      code: 'UNSUPPORTED_INPUT',
+    });
+  });
+
   it('rejects a non-finite extended sample rate', async () => {
     const data = createAiff();
     const view = new DataView(data);
@@ -276,6 +426,7 @@ describe('AIFF malformed and compressed inputs', () => {
     view.setUint32(30, 0x80000000, false);
     view.setUint32(34, 0, false);
 
+    expect(aiffInspector.inspect({ data })?.durationSeconds).toBeNull();
     await expect(aiffDecoder.decode({ data })).rejects.toThrowError(
       expect.objectContaining({ code: 'INVALID_AUDIO_DATA' }),
     );
@@ -319,10 +470,12 @@ interface WavFixtureOptions {
   readonly blockAlign?: number;
   readonly channels?: number;
   readonly extensibleSubformat?: number;
+  readonly extensibleValidBitDepth?: number;
   readonly formatChunkSize?: number;
   readonly formatTag?: number;
   readonly includeData?: boolean;
   readonly includeFormat?: boolean;
+  readonly invalidExtensibleGuid?: boolean;
   readonly payload?: Uint8Array;
   readonly sampleRate?: number;
 }
@@ -357,8 +510,22 @@ function createWav(options: WavFixtureOptions = {}): ArrayBuffer {
       view.setUint32(dataOffset + 8, sampleRate * blockAlign, true);
       view.setUint16(dataOffset + 12, blockAlign, true);
       view.setUint16(dataOffset + 14, bitDepth, true);
-      if (formatChunkSize >= 26 && options.extensibleSubformat !== undefined) {
-        view.setUint16(dataOffset + 24, options.extensibleSubformat, true);
+      if (formatChunkSize >= 40 && options.extensibleSubformat !== undefined) {
+        view.setUint16(dataOffset + 16, 22, true);
+        view.setUint16(
+          dataOffset + 18,
+          options.extensibleValidBitDepth ?? bitDepth,
+          true,
+        );
+        view.setUint32(dataOffset + 24, options.extensibleSubformat, true);
+        view.setUint16(dataOffset + 28, 0, true);
+        view.setUint16(dataOffset + 30, 0x10, true);
+        view.setUint32(
+          dataOffset + 32,
+          options.invalidExtensibleGuid ? 0 : 0x800000aa,
+          false,
+        );
+        view.setUint32(dataOffset + 36, 0x00389b71, false);
       }
     }
     offset += 8 + formatChunkSize;
@@ -371,6 +538,11 @@ function createWav(options: WavFixtureOptions = {}): ArrayBuffer {
   }
   return buffer;
 }
+
+const EXPANDING_PCM_FRAMES =
+  AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES /
+    Float32Array.BYTES_PER_ELEMENT +
+  1;
 
 interface AiffFixtureOptions {
   readonly bitDepth?: number;

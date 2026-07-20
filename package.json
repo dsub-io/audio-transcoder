@@ -7,6 +7,7 @@
   "type": "module",
   "types": "./dist/index.d.ts",
   "sideEffects": [
+    "./dist/stream/worker-entry.js",
     "./dist/worker/entry.js"
   ],
   "repository": {
@@ -21,16 +22,23 @@
     "access": "public"
   },
   "files": [
+    "LICENSE.md",
     "README.md",
+    "THIRD_PARTY_LICENSES",
+    "THIRD_PARTY_NOTICES.md",
     "docs",
     "dist"
   ],
   "scripts": {
     "build": "pnpm generate:metadata && node ./scripts/clean-dist.mjs && tsc --project tsconfig.build.json",
     "check": "pnpm typecheck && pnpm test:coverage && pnpm package:smoke",
+    "demo:check": "pnpm build && tsc --project examples/vite/tsconfig.json && vite build --config examples/vite/vite.config.ts && pnpm demo:verify-build",
+    "demo:verify-build": "node ./scripts/verify-demo-build.mjs",
+    "demo:vite": "pnpm build && vite --config examples/vite/vite.config.ts",
     "generate:metadata": "node ./scripts/generate-package-metadata.mjs",
     "package:smoke": "pnpm build && node ./scripts/verify-package.mjs && pnpm pack --dry-run",
     "test": "pnpm generate:metadata && vitest run",
+    "test:browser": "pnpm build && playwright test",
     "test:coverage": "pnpm generate:metadata && vitest run --coverage",
     "typecheck": "pnpm generate:metadata && tsc --noEmit"
   },
@@ -42,11 +50,23 @@
     "./worker": {
       "types": "./dist/worker/entry.d.ts",
       "import": "./dist/worker/entry.js"
+    },
+    "./stream-worker": {
+      "types": "./dist/stream/worker-entry.d.ts",
+      "import": "./dist/stream/worker-entry.js"
     }
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@vitest/coverage-v8": "^4.1.10",
     "typescript": "6.0.3",
+    "vite": "^8.1.5",
     "vitest": "^4.1.9"
+  },
+  "dependencies": {
+    "@alexanderolsen/libsamplerate-js": "2.1.2",
+    "@mediabunny/flac-encoder": "1.50.9",
+    "@mediabunny/mp3-encoder": "1.50.9",
+    "mediabunny": "1.50.9"
   }
 }

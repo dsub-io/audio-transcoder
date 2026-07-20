@@ -1,14 +1,14 @@
 import type {
+  AudioOperationOptions,
   AudioProgress,
   AudioTranscoderEngine,
 } from '../engine/contracts.js';
-import { AudioTranscoderError } from '../errors.js';
 import type {
   AudioWorkerRequest,
   AudioWorkerResponse,
-  SerializedWorkerError,
   WorkerOperation,
 } from './protocol.js';
+import { serializeWorkerError } from './serialized-error.js';
 
 interface CreateWorkerMessageHandlerOptions {
   readonly engine: AudioTranscoderEngine;
@@ -44,11 +44,14 @@ async function executeOperation(
   signal: AbortSignal,
 ): Promise<void> {
   try {
-    const operationOptions = {
+    const operationOptions: AudioOperationOptions = {
       onProgress: (progress: AudioProgress) => {
         options.postMessage({ id: request.id, progress, type: 'progress' });
       },
       signal,
+      ...(request.unsafeAllowLargeBuffers === undefined
+        ? {}
+        : { unsafeAllowLargeBuffers: request.unsafeAllowLargeBuffers }),
     };
 
     if (request.type === 'decode') {
@@ -79,7 +82,7 @@ async function executeOperation(
     );
   } catch (error) {
     options.postMessage({
-      error: serializeError(error),
+      error: serializeWorkerError(error),
       id: request.id,
       type: 'error',
     });
@@ -96,17 +99,4 @@ function transferableChannelBuffers(
         .filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer),
     ),
   ];
-}
-
-function serializeError(error: unknown): SerializedWorkerError {
-  if (error instanceof AudioTranscoderError) {
-    return { code: error.code, message: error.message, name: error.name };
-  }
-  if (error instanceof Error) {
-    return { message: error.message, name: error.name };
-  }
-  return {
-    message: typeof error === 'string' ? error : 'Unknown worker failure.',
-    name: 'Error',
-  };
 }

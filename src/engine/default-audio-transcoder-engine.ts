@@ -10,6 +10,11 @@ import type {
   PcmAudio,
 } from './contracts.js';
 import { CodecRegistry } from '../codecs/codec-registry.js';
+import {
+  assertWholeBufferDecodeEstimateWithinLimit,
+  assertWholeBufferInputWithinLimit,
+  assertWholeBufferPcmWithinLimit,
+} from './buffer-policy.js';
 import { createProgressPhase, emitFinalProgress } from './progress.js';
 
 export class DefaultAudioTranscoderEngine implements AudioTranscoderEngine {
@@ -25,6 +30,7 @@ export class DefaultAudioTranscoderEngine implements AudioTranscoderEngine {
     input: AudioInput,
     options: AudioOperationOptions = {},
   ): Promise<DecodedAudio> {
+    assertWholeBufferInputWithinLimit(input, options);
     const phase = createProgressPhase({
       operation: 'decode',
       operationOptions: options,
@@ -33,7 +39,13 @@ export class DefaultAudioTranscoderEngine implements AudioTranscoderEngine {
       phaseIndex: 0,
     });
     phase.start();
-    const decoded = await this.#registry.decode(input, phase.context);
+    const decoded = await this.#registry.decode(
+      input,
+      phase.context,
+      (estimate) =>
+        assertWholeBufferDecodeEstimateWithinLimit(estimate, options),
+    );
+    assertWholeBufferPcmWithinLimit(decoded, options);
     phase.complete();
     return decoded;
   }
@@ -43,6 +55,7 @@ export class DefaultAudioTranscoderEngine implements AudioTranscoderEngine {
     presetId: string,
     options: AudioOperationOptions = {},
   ): Promise<EncodedAudio> {
+    assertWholeBufferPcmWithinLimit(audio, options);
     const phase = createProgressPhase({
       operation: 'encode',
       operationOptions: options,
@@ -81,6 +94,7 @@ export class DefaultAudioTranscoderEngine implements AudioTranscoderEngine {
     presetId: string,
     options: AudioOperationOptions = {},
   ): Promise<EncodedAudio> {
+    assertWholeBufferInputWithinLimit(input, options);
     const decodePhase = createProgressPhase({
       operation: 'transcode',
       operationOptions: options,
@@ -89,7 +103,13 @@ export class DefaultAudioTranscoderEngine implements AudioTranscoderEngine {
       phaseIndex: 0,
     });
     decodePhase.start();
-    const decoded = await this.#registry.decode(input, decodePhase.context);
+    const decoded = await this.#registry.decode(
+      input,
+      decodePhase.context,
+      (estimate) =>
+        assertWholeBufferDecodeEstimateWithinLimit(estimate, options),
+    );
+    assertWholeBufferPcmWithinLimit(decoded, options);
     decodePhase.complete();
 
     const encodePhase = createProgressPhase({

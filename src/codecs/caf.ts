@@ -7,6 +7,7 @@ import type {
 import { readAscii, readInt64BE } from './binary.js';
 import type {
   AudioCodecOperationContext,
+  AudioDecodeEstimate,
   AudioDecoderAdapter,
   AudioInspectorAdapter,
 } from './contracts.js';
@@ -40,6 +41,16 @@ interface ParsedCaf {
   readonly description: CafDescription | null;
 }
 
+interface PreparedCafDecode {
+  readonly bytesPerFrame: number;
+  readonly bytesPerSample: number;
+  readonly data: CafData;
+  readonly description: CafDescription;
+  readonly flags: CafFlags;
+  readonly frames: number;
+  readonly view: DataView;
+}
+
 export const cafInspector: AudioInspectorAdapter = Object.freeze({
   formats: Object.freeze(['caf']),
   id: 'builtin.caf.inspector',
@@ -49,23 +60,25 @@ export const cafInspector: AudioInspectorAdapter = Object.freeze({
       return null;
     }
 
-    const parsed = parseCaf(view, input.size ?? input.data.byteLength);
+    const parsed = parseCaf(view);
     const description = parsed.description;
     const bytesPerFrame =
-      description !== null && description.framesPerPacket > 0
-        ? description.bytesPerPacket / description.framesPerPacket
-        : null;
+      description === null ? null : getCafBytesPerFrame(description);
     const durationSeconds =
       description !== null &&
       parsed.data !== null &&
       bytesPerFrame !== null &&
       bytesPerFrame > 0 &&
+      Number.isFinite(description.sampleRate) &&
       description.sampleRate > 0
         ? parsed.data.size / bytesPerFrame / description.sampleRate
         : null;
-    const isLpcm = description?.formatId === 'lpcm';
+    const isLpcm = description !== null && description.formatId === 'lpcm';
+    const validLpcm = isLpcm && isValidCafLpcmDescription(description);
     const builtIn =
-      isLpcm && !hasUnsupportedLpcmLayout(description.flags);
+      validLpcm &&
+      !hasUnsupportedLpcmLayout(description, bytesPerFrame!) &&
+      !hasUnsupportedLpcmSampleRepresentation(description);
 
     return {
       bitDepth: description?.bitDepth ?? null,
@@ -83,7 +96,7 @@ export const cafInspector: AudioInspectorAdapter = Object.freeze({
           : builtIn
             ? []
             : isLpcm
-              ? ['CAF LPCM layout requires a codec plugin.']
+              ? [getUnsupportedCafLpcmNote(description, bytesPerFrame)]
               : ['Compressed CAF requires a browser decoder or codec plugin.'],
       sampleRate: description?.sampleRate ?? null,
     };
@@ -93,65 +106,30 @@ export const cafInspector: AudioInspectorAdapter = Object.freeze({
 export const cafDecoder: AudioDecoderAdapter = Object.freeze({
   formats: Object.freeze(['caf']),
   id: 'builtin.caf.decoder',
+  estimateDecodedPcm(input: AudioInput): AudioDecodeEstimate | null {
+    const prepared = prepareCafDecode(input);
+    return prepared === null
+      ? null
+      : { channels: prepared.description.channels, frames: prepared.frames };
+  },
   async decode(
     input: AudioInput,
     context?: AudioCodecOperationContext,
   ): Promise<DecodedAudio | null> {
-    const view = new DataView(input.data);
-    if (!isCaf(view)) {
+    const prepared = prepareCafDecode(input);
+    if (prepared === null) {
       return null;
     }
 
-    const parsed = parseCaf(view, input.size ?? input.data.byteLength);
-    const description = parsed.description;
-    const data = parsed.data;
-    if (description === null || data === null) {
-      throw invalidCaf('CAF requires both desc and data chunks.');
-    }
-    if (description.formatId !== 'lpcm') {
-      throw new AudioTranscoderError(
-        'UNSUPPORTED_INPUT',
-        `CAF format "${description.formatId}" is not built-in LPCM.`,
-      );
-    }
-    if (hasUnsupportedLpcmLayout(description.flags)) {
-      throw new AudioTranscoderError(
-        'UNSUPPORTED_INPUT',
-        'Non-interleaved or high-aligned CAF LPCM is not built in.',
-      );
-    }
-    if (
-      description.channels <= 0 ||
-      !Number.isFinite(description.sampleRate) ||
-      description.sampleRate <= 0 ||
-      description.framesPerPacket <= 0 ||
-      description.bytesPerPacket <= 0 ||
-      description.bitDepth <= 0 ||
-      description.bitDepth % 8 !== 0
-    ) {
-      throw invalidCaf('CAF LPCM description fields are invalid.');
-    }
-
-    const bytesPerSample = description.bitDepth / 8;
-    const bytesPerFrame =
-      description.bytesPerPacket / description.framesPerPacket;
-    if (
-      !Number.isInteger(bytesPerFrame) ||
-      bytesPerSample * description.channels > bytesPerFrame
-    ) {
-      throw invalidCaf('CAF packet layout is not valid interleaved PCM.');
-    }
-
-    const availableBytes = Math.min(
-      data.size,
-      Math.max(0, view.byteLength - data.offset),
-    );
-    const frames = Math.floor(availableBytes / bytesPerFrame);
-    if (frames === 0) {
-      throw invalidCaf('CAF data chunk does not contain a complete frame.');
-    }
-
-    const flags = decodeCafFlags(description.flags);
+    const {
+      bytesPerFrame,
+      bytesPerSample,
+      data,
+      description,
+      flags,
+      frames,
+      view,
+    } = prepared;
     const channelData = Array.from(
       { length: description.channels },
       () => new Float32Array(frames),
@@ -189,7 +167,7 @@ function isCaf(view: DataView): boolean {
   return readAscii(view, 0, 4) === 'caff';
 }
 
-function parseCaf(view: DataView, fileSize: number): ParsedCaf {
+function parseCaf(view: DataView): ParsedCaf {
   let offset = 8;
   let description: CafDescription | null = null;
   let data: CafData | null = null;
@@ -198,8 +176,13 @@ function parseCaf(view: DataView, fileSize: number): ParsedCaf {
     const chunkType = readAscii(view, offset, 4);
     const chunkSize = readInt64BE(view, offset + 4);
     const dataOffset = offset + 12;
+    if (chunkSize < -1n) {
+      break;
+    }
     const logicalSize =
-      chunkSize < 0n ? BigInt(Math.max(0, fileSize - dataOffset)) : chunkSize;
+      chunkSize === -1n
+        ? BigInt(Math.max(0, view.byteLength - dataOffset))
+        : chunkSize;
 
     if (chunkType === 'desc' && logicalSize >= 32n && dataOffset + 32 <= view.byteLength) {
       description = {
@@ -214,9 +197,14 @@ function parseCaf(view: DataView, fileSize: number): ParsedCaf {
     }
 
     if (chunkType === 'data') {
+      const availableBytes = Math.max(0, view.byteLength - dataOffset);
+      const storedBytes =
+        logicalSize > BigInt(availableBytes)
+          ? availableBytes
+          : Number(logicalSize);
       data = {
         offset: dataOffset + 4,
-        size: Math.max(0, Number(logicalSize) - 4),
+        size: Math.max(0, storedBytes - 4),
       };
       break;
     }
@@ -231,11 +219,69 @@ function parseCaf(view: DataView, fileSize: number): ParsedCaf {
   return { data, description };
 }
 
+function prepareCafDecode(input: AudioInput): PreparedCafDecode | null {
+  const view = new DataView(input.data);
+  if (!isCaf(view)) {
+    return null;
+  }
+
+  const { data, description } = parseCaf(view);
+  if (description === null || data === null) {
+    throw invalidCaf('CAF requires both desc and data chunks.');
+  }
+  if (description.formatId !== 'lpcm') {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_INPUT',
+      `CAF format "${description.formatId}" is not built-in LPCM.`,
+    );
+  }
+  if (!isValidCafLpcmDescription(description)) {
+    throw invalidCaf('CAF LPCM description fields are invalid.');
+  }
+
+  const bytesPerFrame = getCafBytesPerFrame(description)!;
+  if (hasUnsupportedLpcmLayout(description, bytesPerFrame)) {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_INPUT',
+      'Non-interleaved, padded, or high-aligned CAF LPCM is not built in.',
+    );
+  }
+  if (hasUnsupportedLpcmSampleRepresentation(description)) {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_INPUT',
+      'This CAF LPCM sample representation is not built in.',
+    );
+  }
+
+  const availableBytes = Math.min(
+    data.size,
+    Math.max(0, view.byteLength - data.offset),
+  );
+  const frames = Math.floor(availableBytes / bytesPerFrame);
+  if (frames === 0) {
+    throw invalidCaf('CAF data chunk does not contain a complete frame.');
+  }
+
+  return {
+    bytesPerFrame,
+    bytesPerSample: description.bitDepth / 8,
+    data,
+    description,
+    flags: decodeCafFlags(description.flags),
+    frames,
+    view,
+  };
+}
+
 function decodeCafFlags(flags: number): CafFlags {
   const float = Boolean(flags & 1);
   const bigEndian = Boolean(flags & 2);
   const signed = Boolean(flags & 4);
-  const sampleFormat = float ? 'float' : signed ? 'signed int' : 'integer';
+  const sampleFormat = float
+    ? 'float'
+    : signed
+      ? 'signed int'
+      : 'unsigned int';
 
   return {
     bigEndian,
@@ -245,10 +291,64 @@ function decodeCafFlags(flags: number): CafFlags {
   };
 }
 
-function hasUnsupportedLpcmLayout(flags: number): boolean {
-  const alignedHigh = Boolean(flags & 16);
-  const nonInterleaved = Boolean(flags & 32);
-  return alignedHigh || nonInterleaved;
+function getCafBytesPerFrame(description: CafDescription): number | null {
+  if (description.framesPerPacket <= 0) {
+    return null;
+  }
+
+  const bytesPerFrame =
+    description.bytesPerPacket / description.framesPerPacket;
+  return Number.isSafeInteger(bytesPerFrame) && bytesPerFrame > 0
+    ? bytesPerFrame
+    : null;
+}
+
+function getUnsupportedCafLpcmNote(
+  description: CafDescription,
+  bytesPerFrame: number | null,
+): string {
+  if (!isValidCafLpcmDescription(description)) {
+    return 'CAF LPCM description is invalid.';
+  }
+  if (hasUnsupportedLpcmLayout(description, bytesPerFrame!)) {
+    return 'CAF LPCM layout requires a codec plugin.';
+  }
+  return 'CAF LPCM sample representation requires a codec plugin.';
+}
+
+function hasUnsupportedLpcmLayout(
+  description: CafDescription,
+  bytesPerFrame: number,
+): boolean {
+  const alignedHigh = Boolean(description.flags & 16);
+  const nonInterleaved = Boolean(description.flags & 32);
+  const packedFrameBytes =
+    (description.bitDepth / 8) * description.channels;
+  return alignedHigh || nonInterleaved || bytesPerFrame !== packedFrameBytes;
+}
+
+function hasUnsupportedLpcmSampleRepresentation(
+  description: CafDescription,
+): boolean {
+  const flags = decodeCafFlags(description.flags);
+  return flags.float
+    ? description.bitDepth !== 32 && description.bitDepth !== 64
+    : ![8, 16, 24, 32].includes(description.bitDepth) ||
+        (!flags.signed && description.bitDepth !== 8);
+}
+
+function isValidCafLpcmDescription(description: CafDescription): boolean {
+  const bytesPerFrame = getCafBytesPerFrame(description);
+  return (
+    description.channels > 0 &&
+    Number.isFinite(description.sampleRate) &&
+    description.sampleRate > 0 &&
+    description.bytesPerPacket > 0 &&
+    description.bitDepth > 0 &&
+    description.bitDepth % 8 === 0 &&
+    bytesPerFrame !== null &&
+    (description.bitDepth / 8) * description.channels <= bytesPerFrame
+  );
 }
 
 function invalidCaf(message: string): AudioTranscoderError {

@@ -103,6 +103,16 @@ describe('PCM primitives', () => {
     expect(() => readPcmSample(view, 0, 24, floating(true))).toThrowError(
       expect.objectContaining({ code: 'UNSUPPORTED_INPUT' }),
     );
+    for (const bitDepth of [16, 24, 32]) {
+      expect(() =>
+        readPcmSample(view, 0, bitDepth, integer(true, false)),
+      ).toThrowError(
+        expect.objectContaining({
+          code: 'UNSUPPORTED_INPUT',
+          message: expect.stringContaining('unsigned'),
+        }),
+      );
+    }
   });
 
   it('clips and scales integer output symmetrically', () => {

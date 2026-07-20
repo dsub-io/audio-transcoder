@@ -11,6 +11,10 @@ import type {
 } from '../engine/contracts.js';
 import { createAudioTranscoderEngine } from '../engine/factory.js';
 import {
+  AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES,
+  getUniquePcmBufferByteLength,
+} from '../engine/buffer-policy.js';
+import {
   createOperationAbortedError,
   createWorkerTerminatedError,
 } from '../engine/operation-errors.js';
@@ -18,12 +22,21 @@ import { AudioTranscoderError } from '../errors.js';
 import { createAudioTranscoderWorkerEngine } from './client.js';
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_QUEUED = 8;
+const MAX_CONCURRENCY = 4;
+const MAX_QUEUED = 64;
 
 /** Current bounded-queue and Worker allocation counts. */
 export interface AudioTranscoderQueueSnapshot {
   readonly active: number;
   readonly concurrency: number;
+  /** Configured waiting limit from 0 to 64; active operations are excluded. */
+  readonly maxQueued: number;
+  /** Configured aggregate byte limit for waiting operations. */
+  readonly maxQueuedBytes: number;
   readonly queued: number;
+  /** Bytes retained by waiting operations; active operations are excluded. */
+  readonly queuedBytes: number;
   readonly terminated: boolean;
   readonly workers: number;
 }
@@ -41,6 +54,7 @@ export interface AudioTranscoderWorkerPool extends AudioTranscoderWorkerEngine {
    * Defers arbitrary work until a Worker slot is available. Use this to delay
    * `File.arrayBuffer()` and avoid retaining every input buffer in the queue.
    * The callback must pass `options.signal` to its running engine operation.
+   * Captures owned by arbitrary callbacks cannot be included in `queuedBytes`.
    */
   schedule<T>(
     operation: (engine: AudioTranscoderWorkerEngine) => Promise<T>,
@@ -50,8 +64,8 @@ export interface AudioTranscoderWorkerPool extends AudioTranscoderWorkerEngine {
 
 export interface CreateAudioTranscoderWorkerPoolOptions {
   /**
-   * Maximum simultaneous whole-buffer operations and Workers. Defaults to 1;
-   * raise it only after measuring peak memory on target devices.
+   * Maximum simultaneous whole-buffer operations and Workers, from 1 to 4.
+   * Defaults to 1; raise it only after measuring peak memory on target devices.
    */
   readonly concurrency?: number;
 
@@ -60,6 +74,20 @@ export interface CreateAudioTranscoderWorkerPoolOptions {
    * Defaults to 30 seconds. Use `null` to keep idle Workers alive.
    */
   readonly idleTimeoutMs?: number | null;
+
+  /**
+   * Maximum operations waiting for a Worker slot. Defaults to 8. Active
+   * operations are excluded. Must be an integer from 0 to 64; use 0 to reject
+   * whenever every slot is busy.
+   */
+  readonly maxQueued?: number;
+
+  /**
+   * Maximum bytes retained by operations waiting for a Worker slot. Defaults
+   * to the 64 MiB whole-buffer safety limit. Active operations are excluded.
+   * `unsafeAllowLargeBuffers` does not bypass this aggregate limit.
+   */
+  readonly maxQueuedBytes?: number;
 
   /**
    * Creates each Worker for custom entry URLs or CSP handling. The index is
@@ -73,8 +101,9 @@ interface QueuedOperation {
   execute:
     | ((engine: AudioTranscoderWorkerEngine) => Promise<unknown>)
     | undefined;
-  readonly reject: (reason: unknown) => void;
-  readonly resolve: (value: unknown) => void;
+  reject: ((reason: unknown) => void) | undefined;
+  resolve: ((value: unknown) => void) | undefined;
+  queuedBytes: number;
 }
 
 interface WorkerSlot {
@@ -91,12 +120,15 @@ interface WorkerSlot {
 export function createAudioTranscoderWorkerPool(
   options: CreateAudioTranscoderWorkerPoolOptions = {},
 ): AudioTranscoderWorkerPool {
-  const concurrency = validateConcurrency(options.concurrency ?? 1);
+  const concurrency = validateConcurrency(options.concurrency);
   const idleTimeoutMs = validateIdleTimeout(options.idleTimeoutMs);
+  const maxQueued = validateMaxQueued(options.maxQueued);
+  const maxQueuedBytes = validateMaxQueuedBytes(options.maxQueuedBytes);
   const slots = createWorkerSlots(concurrency);
   const queue: QueuedOperation[] = [];
   const localEngine = createAudioTranscoderEngine();
   let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  let queuedBytes = 0;
   let terminated = false;
 
   const clearIdleRelease = (): void => {
@@ -141,10 +173,52 @@ export function createAudioTranscoderWorkerPool(
     Object.freeze({
       active: slots.filter(({ active }) => active).length,
       concurrency,
+      maxQueued,
+      maxQueuedBytes,
       queued: queue.length,
+      queuedBytes,
       terminated,
       workers: slots.filter(({ engine }) => engine !== undefined).length,
     });
+
+  const detachQueuedAbort = (operation: QueuedOperation): void => {
+    operation.detachQueuedAbort?.();
+    operation.detachQueuedAbort = undefined;
+  };
+
+  const releaseOperation = (operation: QueuedOperation): void => {
+    releaseQueuedBytes(operation);
+    detachQueuedAbort(operation);
+    operation.execute = undefined;
+    operation.reject = undefined;
+    operation.resolve = undefined;
+  };
+
+  const releaseQueuedBytes = (operation: QueuedOperation): void => {
+    if (operation.queuedBytes === 0) {
+      return;
+    }
+    queuedBytes -= operation.queuedBytes;
+    operation.queuedBytes = 0;
+  };
+
+  const rejectOperation = (
+    operation: QueuedOperation,
+    reason: unknown,
+  ): void => {
+    const reject = operation.reject!;
+    releaseOperation(operation);
+    reject(reason);
+  };
+
+  const resolveOperation = (
+    operation: QueuedOperation,
+    value: unknown,
+  ): void => {
+    const resolve = operation.resolve!;
+    releaseOperation(operation);
+    resolve(value);
+  };
 
   const shutdown = (error: AudioTranscoderError): void => {
     if (terminated) {
@@ -154,15 +228,15 @@ export function createAudioTranscoderWorkerPool(
     clearIdleRelease();
 
     for (const operation of queue.splice(0)) {
-      operation.detachQueuedAbort?.();
-      operation.detachQueuedAbort = undefined;
-      operation.execute = undefined;
-      operation.reject(error);
+      rejectOperation(operation, error);
     }
     for (const slot of slots) {
-      slot.operation?.reject(error);
+      const operation = slot.operation;
       slot.operation = undefined;
       slot.active = false;
+      if (operation !== undefined) {
+        rejectOperation(operation, error);
+      }
       slot.engine?.terminate();
       slot.engine = undefined;
     }
@@ -172,18 +246,18 @@ export function createAudioTranscoderWorkerPool(
     const workerFactory = options.workerFactory;
     const engine = createAudioTranscoderWorkerEngine(
       workerFactory === undefined
-        ? {}
-        : { workerFactory: () => workerFactory(slot.index) },
+        ? { maxQueued: 0, maxQueuedBytes: 0 }
+        : {
+            maxQueued: 0,
+            maxQueuedBytes: 0,
+            workerFactory: () => workerFactory(slot.index),
+          },
     );
     slot.engine = engine;
     return engine;
   };
 
   const drain = (): void => {
-    if (terminated) {
-      return;
-    }
-
     for (const slot of slots) {
       if (slot.active) {
         continue;
@@ -194,8 +268,8 @@ export function createAudioTranscoderWorkerPool(
         return;
       }
 
-      operation.detachQueuedAbort?.();
-      operation.detachQueuedAbort = undefined;
+      releaseQueuedBytes(operation);
+      detachQueuedAbort(operation);
       const execute = operation.execute!;
       operation.execute = undefined;
       clearIdleRelease();
@@ -205,7 +279,7 @@ export function createAudioTranscoderWorkerPool(
         engine = slot.engine ?? createSlotEngine(slot);
       } catch (error) {
         const workerError = normalizeWorkerFailure(error);
-        operation.reject(workerError);
+        rejectOperation(operation, workerError);
         shutdown(workerError);
         return;
       }
@@ -222,9 +296,12 @@ export function createAudioTranscoderWorkerPool(
 
       void result.then(
         (value) => {
+          if (slot.operation !== operation) {
+            return;
+          }
           slot.active = false;
           slot.operation = undefined;
-          operation.resolve(value);
+          resolveOperation(operation, value);
           drain();
         },
         (error: unknown) => {
@@ -235,8 +312,11 @@ export function createAudioTranscoderWorkerPool(
   };
 
   const enqueue = <T>(
-    execute: (engine: AudioTranscoderWorkerEngine) => Promise<T>,
+    createExecute: () => (
+      engine: AudioTranscoderWorkerEngine,
+    ) => Promise<T>,
     signal: AbortSignal | undefined,
+    getRetainedBytes: () => number,
   ): Promise<T> => {
     if (terminated) {
       return Promise.reject(createWorkerTerminatedError());
@@ -244,27 +324,68 @@ export function createAudioTranscoderWorkerPool(
     if (signal?.aborted) {
       return Promise.reject(createOperationAbortedError(signal));
     }
+    const waitsForSlot = !slots.some(({ active }) => !active);
+    if (waitsForSlot && queue.length >= maxQueued) {
+      return Promise.reject(createQueueCapacityExceededError(maxQueued));
+    }
+
+    let retainedBytes: number;
+    try {
+      retainedBytes = getRetainedBytes();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (
+      waitsForSlot &&
+      exceedsQueuedByteLimit(queuedBytes, retainedBytes, maxQueuedBytes)
+    ) {
+      return Promise.reject(
+        createQueueBytesExceededError(
+          maxQueuedBytes,
+          queuedBytes,
+          retainedBytes,
+        ),
+      );
+    }
+
+    const queuedReservation = waitsForSlot ? retainedBytes : 0;
+    queuedBytes += queuedReservation;
+
+    let execute: (engine: AudioTranscoderWorkerEngine) => Promise<T>;
+    try {
+      execute = createExecute();
+    } catch (error) {
+      queuedBytes -= queuedReservation;
+      return Promise.reject(error);
+    }
 
     return new Promise<T>((resolve, reject) => {
       const operation: QueuedOperation = {
         detachQueuedAbort: undefined,
         execute,
+        queuedBytes: queuedReservation,
         reject,
         resolve: (value) => resolve(value as T),
       };
 
-      if (signal !== undefined) {
-        const abort = (): void => {
-          queue.splice(queue.indexOf(operation), 1);
-          operation.detachQueuedAbort?.();
-          operation.detachQueuedAbort = undefined;
-          operation.execute = undefined;
-          operation.reject(createOperationAbortedError(signal));
-          scheduleIdleRelease();
-        };
-        signal.addEventListener('abort', abort, { once: true });
-        operation.detachQueuedAbort = () =>
-          signal.removeEventListener('abort', abort);
+      try {
+        if (signal !== undefined) {
+          const abort = (): void => {
+            const queueIndex = queue.indexOf(operation);
+            if (queueIndex === -1) {
+              return;
+            }
+            queue.splice(queueIndex, 1);
+            rejectOperation(operation, createOperationAbortedError(signal));
+            scheduleIdleRelease();
+          };
+          signal.addEventListener('abort', abort, { once: true });
+          operation.detachQueuedAbort = () =>
+            signal.removeEventListener('abort', abort);
+        }
+      } catch (error) {
+        rejectOperation(operation, error);
+        return;
       }
 
       clearIdleRelease();
@@ -276,7 +397,7 @@ export function createAudioTranscoderWorkerPool(
   const schedule = <T>(
     operation: (engine: AudioTranscoderWorkerEngine) => Promise<T>,
     scheduleOptions: AudioTranscoderPoolScheduleOptions = {},
-  ): Promise<T> => enqueue(operation, scheduleOptions.signal);
+  ): Promise<T> => enqueue(() => operation, scheduleOptions.signal, () => 0);
 
   return {
     decode(
@@ -284,8 +405,13 @@ export function createAudioTranscoderWorkerPool(
       operationOptions: AudioOperationOptions = {},
     ): Promise<DecodedAudio> {
       return enqueue(
-        (engine) => engine.decode(input, operationOptions),
+        () => {
+          const inputSnapshot = snapshotAudioInput(input);
+          const optionsSnapshot = snapshotOperationOptions(operationOptions);
+          return (engine) => engine.decode(inputSnapshot, optionsSnapshot);
+        },
         operationOptions.signal,
+        () => getAudioInputRetainedBytes(input),
       );
     },
     encode(
@@ -294,8 +420,14 @@ export function createAudioTranscoderWorkerPool(
       operationOptions: AudioOperationOptions = {},
     ): Promise<EncodedAudio> {
       return enqueue(
-        (engine) => engine.encode(audio, presetId, operationOptions),
+        () => {
+          const audioSnapshot = snapshotPcmAudio(audio);
+          const optionsSnapshot = snapshotOperationOptions(operationOptions);
+          return (engine) =>
+            engine.encode(audioSnapshot, presetId, optionsSnapshot);
+        },
         operationOptions.signal,
+        () => getUniquePcmBufferByteLength(audio.channelData),
       );
     },
     getCapabilities(): AudioTranscoderCapabilities {
@@ -321,8 +453,14 @@ export function createAudioTranscoderWorkerPool(
       operationOptions: AudioOperationOptions = {},
     ): Promise<EncodedAudio> {
       return enqueue(
-        (engine) => engine.transcode(input, presetId, operationOptions),
+        () => {
+          const inputSnapshot = snapshotAudioInput(input);
+          const optionsSnapshot = snapshotOperationOptions(operationOptions);
+          return (engine) =>
+            engine.transcode(inputSnapshot, presetId, optionsSnapshot);
+        },
         operationOptions.signal,
+        () => getAudioInputRetainedBytes(input),
       );
     },
   };
@@ -332,9 +470,12 @@ export function createAudioTranscoderWorkerPool(
     operation: QueuedOperation,
     error: unknown,
   ): void {
+    if (slot.operation !== operation) {
+      return;
+    }
     slot.active = false;
     slot.operation = undefined;
-    operation.reject(error);
+    rejectOperation(operation, error);
     if (isFatalWorkerError(error)) {
       shutdown(error);
     } else {
@@ -343,14 +484,108 @@ export function createAudioTranscoderWorkerPool(
   }
 }
 
-function validateConcurrency(concurrency: number): number {
-  if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+function validateConcurrency(concurrency: number | undefined): number {
+  const resolved = concurrency === undefined ? 1 : concurrency;
+  if (
+    !Number.isSafeInteger(resolved) ||
+    resolved < 1 ||
+    resolved > MAX_CONCURRENCY
+  ) {
     throw new AudioTranscoderError(
       'INVALID_CONFIGURATION',
-      'Worker pool concurrency must be a positive safe integer.',
+      `Worker pool concurrency must be an integer from 1 to ${MAX_CONCURRENCY}.`,
     );
   }
-  return concurrency;
+  return resolved;
+}
+
+function validateMaxQueued(maxQueued: number | undefined): number {
+  const resolved =
+    maxQueued === undefined ? DEFAULT_MAX_QUEUED : maxQueued;
+  if (
+    !Number.isSafeInteger(resolved) ||
+    resolved < 0 ||
+    resolved > MAX_QUEUED
+  ) {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      `Worker pool maxQueued must be an integer from 0 to ${MAX_QUEUED}.`,
+    );
+  }
+  return resolved;
+}
+
+function validateMaxQueuedBytes(maxQueuedBytes: number | undefined): number {
+  const resolved =
+    maxQueuedBytes === undefined
+      ? AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES
+      : maxQueuedBytes;
+  if (!Number.isSafeInteger(resolved) || resolved < 0) {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      'Worker pool maxQueuedBytes must be a non-negative safe integer.',
+    );
+  }
+  return resolved;
+}
+
+function createQueueCapacityExceededError(
+  maxQueued: number,
+): AudioTranscoderError {
+  return new AudioTranscoderError(
+    'QUEUE_CAPACITY_EXCEEDED',
+    `Audio transcoder Worker pool queue is full (maxQueued: ${maxQueued}; active operations excluded).`,
+  );
+}
+
+function createQueueBytesExceededError(
+  maxQueuedBytes: number,
+  queuedBytes: number,
+  retainedBytes: number,
+): AudioTranscoderError {
+  return new AudioTranscoderError(
+    'RESOURCE_LIMIT_EXCEEDED',
+    `Audio transcoder Worker pool waiting queue exceeds maxQueuedBytes (${maxQueuedBytes} bytes; queued: ${queuedBytes} bytes; requested: ${formatRetainedBytes(retainedBytes)}; active operations excluded).`,
+  );
+}
+
+function exceedsQueuedByteLimit(
+  queuedBytes: number,
+  retainedBytes: number,
+  maxQueuedBytes: number,
+): boolean {
+  return (
+    !Number.isSafeInteger(retainedBytes) ||
+    retainedBytes < 0 ||
+    retainedBytes > maxQueuedBytes - queuedBytes
+  );
+}
+
+function formatRetainedBytes(retainedBytes: number): string {
+  return Number.isSafeInteger(retainedBytes) && retainedBytes >= 0
+    ? `${retainedBytes} bytes`
+    : 'an unsafe size';
+}
+
+function getAudioInputRetainedBytes(input: AudioInput): number {
+  return input.data.byteLength;
+}
+
+function snapshotAudioInput(input: AudioInput): AudioInput {
+  return Object.freeze({ ...input });
+}
+
+function snapshotOperationOptions(
+  options: AudioOperationOptions,
+): AudioOperationOptions {
+  return Object.freeze({ ...options });
+}
+
+function snapshotPcmAudio(audio: PcmAudio): PcmAudio {
+  return Object.freeze({
+    channelData: Object.freeze([...audio.channelData]),
+    sampleRate: audio.sampleRate,
+  });
 }
 
 function validateIdleTimeout(

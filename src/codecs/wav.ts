@@ -10,6 +10,7 @@ import type {
 import { readAscii, writeAscii, writeInt24LE } from './binary.js';
 import type {
   AudioCodecOperationContext,
+  AudioDecodeEstimate,
   AudioDecoderAdapter,
   AudioEncoderAdapter,
   AudioInspectorAdapter,
@@ -20,6 +21,12 @@ import {
   validatePcmAudio,
 } from './pcm.js';
 import { processFrameBatches } from './frame-batches.js';
+import {
+  WAV_OUTPUT_PRESET_DESCRIPTORS,
+  WAV_OUTPUT_PRESETS,
+} from './wav-presets.js';
+
+export { WAV_OUTPUT_PRESETS } from './wav-presets.js';
 
 interface WavFormat {
   readonly bitDepth: number;
@@ -40,22 +47,13 @@ interface ParsedWav {
   readonly format: WavFormat | null;
 }
 
-interface WavEncoding {
-  readonly bitDepth: 16 | 24 | 32;
-  readonly float: boolean;
+interface PreparedWavDecode {
+  readonly bytesPerSample: number;
+  readonly data: WavData;
+  readonly format: WavFormat;
+  readonly frames: number;
+  readonly view: DataView;
 }
-
-export const WAV_OUTPUT_PRESETS = Object.freeze([
-  createPreset('wav-pcm16', 16, 'integer'),
-  createPreset('wav-pcm24', 24, 'integer'),
-  createPreset('wav-float32', 32, 'float'),
-]);
-
-const WAV_ENCODINGS: Readonly<Record<string, WavEncoding>> = Object.freeze({
-  'wav-float32': Object.freeze({ bitDepth: 32, float: true }),
-  'wav-pcm16': Object.freeze({ bitDepth: 16, float: false }),
-  'wav-pcm24': Object.freeze({ bitDepth: 24, float: false }),
-});
 
 export const wavInspector: AudioInspectorAdapter = Object.freeze({
   formats: Object.freeze(['wav']),
@@ -68,6 +66,10 @@ export const wavInspector: AudioInspectorAdapter = Object.freeze({
 
     const parsed = parseWav(view);
     const format = parsed.format;
+    const builtIn =
+      format !== null &&
+      hasValidWavPcmFormat(format) &&
+      isSupportedWavSampleRepresentation(format);
     const codec =
       format?.formatTag === 1
         ? 'PCM integer'
@@ -82,10 +84,7 @@ export const wavInspector: AudioInspectorAdapter = Object.freeze({
       channels: format?.channels ?? null,
       codec,
       container: 'WAV',
-      decodeSupport:
-        format?.formatTag === 1 || format?.formatTag === 3
-          ? 'built-in'
-          : 'browser-dependent',
+      decodeSupport: builtIn ? 'built-in' : 'browser-dependent',
       durationSeconds: calculateDuration(parsed, input),
       notes: format === null ? ['WAV fmt chunk was not found.'] : [],
       sampleRate: format?.sampleRate ?? null,
@@ -96,50 +95,22 @@ export const wavInspector: AudioInspectorAdapter = Object.freeze({
 export const wavDecoder: AudioDecoderAdapter = Object.freeze({
   formats: Object.freeze(['wav']),
   id: 'builtin.wav.decoder',
+  estimateDecodedPcm(input: AudioInput): AudioDecodeEstimate | null {
+    const prepared = prepareWavDecode(input);
+    return prepared === null
+      ? null
+      : { channels: prepared.format.channels, frames: prepared.frames };
+  },
   async decode(
     input: AudioInput,
     context?: AudioCodecOperationContext,
   ): Promise<DecodedAudio | null> {
-    const view = new DataView(input.data);
-    if (!isWav(view)) {
+    const prepared = prepareWavDecode(input);
+    if (prepared === null) {
       return null;
     }
 
-    const parsed = parseWav(view);
-    const format = parsed.format;
-    const data = parsed.data;
-    if (format === null || data === null) {
-      throw invalidWav('WAV requires both fmt and data chunks.');
-    }
-    if (format.formatTag !== 1 && format.formatTag !== 3) {
-      throw new AudioTranscoderError(
-        'UNSUPPORTED_INPUT',
-        `WAVE format ${format.formatTag} is not built-in PCM.`,
-      );
-    }
-    if (
-      format.channels <= 0 ||
-      format.sampleRate <= 0 ||
-      format.blockAlign <= 0 ||
-      format.bitDepth <= 0 ||
-      format.bitDepth % 8 !== 0
-    ) {
-      throw invalidWav('WAV PCM format fields are invalid.');
-    }
-
-    const bytesPerSample = format.bitDepth / 8;
-    if (bytesPerSample * format.channels > format.blockAlign) {
-      throw invalidWav('WAV block alignment is smaller than one PCM frame.');
-    }
-
-    const availableBytes = Math.min(
-      data.size,
-      Math.max(0, view.byteLength - data.offset),
-    );
-    const frames = Math.floor(availableBytes / format.blockAlign);
-    if (frames === 0) {
-      throw invalidWav('WAV data chunk does not contain a complete frame.');
-    }
+    const { bytesPerSample, data, format, frames, view } = prepared;
 
     const channelData = Array.from(
       { length: format.channels },
@@ -182,7 +153,9 @@ export const wavEncoder: AudioEncoderAdapter = Object.freeze({
     preset: AudioOutputPreset,
     context?: AudioCodecOperationContext,
   ): Promise<EncodedAudio> {
-    const encoding = WAV_ENCODINGS[preset.id];
+    const encoding = WAV_OUTPUT_PRESET_DESCRIPTORS.find(
+      ({ preset: candidate }) => candidate.id === preset.id,
+    );
     if (encoding === undefined) {
       throw new AudioTranscoderError(
         'UNSUPPORTED_OUTPUT',
@@ -196,12 +169,13 @@ export const wavEncoder: AudioEncoderAdapter = Object.freeze({
     const buffer = new ArrayBuffer(44 + dataBytes);
     const view = new DataView(buffer);
 
+    const float = !encoding.integer;
     writeAscii(view, 0, 'RIFF');
     view.setUint32(4, 36 + dataBytes, true);
     writeAscii(view, 8, 'WAVE');
     writeAscii(view, 12, 'fmt ');
     view.setUint32(16, 16, true);
-    view.setUint16(20, encoding.float ? 3 : 1, true);
+    view.setUint16(20, float ? 3 : 1, true);
     view.setUint16(22, channels, true);
     view.setUint32(24, sampleRate, true);
     view.setUint32(28, sampleRate * channels * bytesPerSample, true);
@@ -216,12 +190,14 @@ export const wavEncoder: AudioEncoderAdapter = Object.freeze({
           const sample = audio.channelData[channel]![frame]!;
           const offset =
             44 + (frame * channels + channel) * bytesPerSample;
-          if (encoding.float) {
+          if (float) {
             view.setFloat32(offset, Math.min(1, Math.max(-1, sample)), true);
           } else if (encoding.bitDepth === 16) {
             view.setInt16(offset, sampleToInteger(sample, 16), true);
-          } else {
+          } else if (encoding.bitDepth === 24) {
             writeInt24LE(view, offset, sampleToInteger(sample, 24));
+          } else {
+            view.setInt32(offset, sampleToInteger(sample, 32), true);
           }
         }
       }
@@ -246,12 +222,20 @@ function parseWav(view: DataView): ParsedWav {
     const dataOffset = offset + 8;
 
     if (chunkId === 'fmt ' && chunkSize >= 16 && dataOffset + 16 <= view.byteLength) {
+      const bitDepth = view.getUint16(dataOffset + 14, true);
       let formatTag = view.getUint16(dataOffset, true);
-      if (formatTag === 0xfffe && chunkSize >= 40 && dataOffset + 26 <= view.byteLength) {
-        formatTag = view.getUint16(dataOffset + 24, true);
+      if (
+        formatTag === 0xfffe &&
+        chunkSize >= 40 &&
+        dataOffset + 40 <= view.byteLength &&
+        view.getUint16(dataOffset + 16, true) >= 22 &&
+        view.getUint16(dataOffset + 18, true) === bitDepth
+      ) {
+        formatTag =
+          readWaveExtensibleFormatTag(view, dataOffset + 24) ?? formatTag;
       }
       format = {
-        bitDepth: view.getUint16(dataOffset + 14, true),
+        bitDepth,
         blockAlign: view.getUint16(dataOffset + 12, true),
         byteRate: view.getUint32(dataOffset + 8, true),
         channels: view.getUint16(dataOffset + 2, true),
@@ -271,6 +255,90 @@ function parseWav(view: DataView): ParsedWav {
   return { data, format };
 }
 
+function prepareWavDecode(input: AudioInput): PreparedWavDecode | null {
+  const view = new DataView(input.data);
+  if (!isWav(view)) {
+    return null;
+  }
+
+  const { data, format } = parseWav(view);
+  if (format === null || data === null) {
+    throw invalidWav('WAV requires both fmt and data chunks.');
+  }
+  if (format.formatTag !== 1 && format.formatTag !== 3) {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_INPUT',
+      `WAVE format ${format.formatTag} is not built-in PCM.`,
+    );
+  }
+  if (!hasValidWavPcmFields(format)) {
+    throw invalidWav('WAV PCM format fields are invalid.');
+  }
+  if (!isSupportedWavSampleRepresentation(format)) {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_INPUT',
+      `Unsupported ${format.bitDepth}-bit WAVE PCM representation.`,
+    );
+  }
+
+  const bytesPerSample = format.bitDepth / 8;
+  if (bytesPerSample * format.channels > format.blockAlign) {
+    throw invalidWav('WAV block alignment is smaller than one PCM frame.');
+  }
+
+  const availableBytes = Math.min(
+    data.size,
+    Math.max(0, view.byteLength - data.offset),
+  );
+  const frames = Math.floor(availableBytes / format.blockAlign);
+  if (frames === 0) {
+    throw invalidWav('WAV data chunk does not contain a complete frame.');
+  }
+
+  return { bytesPerSample, data, format, frames, view };
+}
+
+function isSupportedWavSampleRepresentation(format: WavFormat): boolean {
+  return format.formatTag === 1
+    ? [8, 16, 24, 32].includes(format.bitDepth)
+    : format.formatTag === 3 &&
+        (format.bitDepth === 32 || format.bitDepth === 64);
+}
+
+function hasValidWavPcmFields(format: WavFormat): boolean {
+  return (
+    format.channels > 0 &&
+    format.sampleRate > 0 &&
+    format.blockAlign > 0 &&
+    format.bitDepth > 0 &&
+    format.bitDepth % 8 === 0
+  );
+}
+
+function hasValidWavPcmFormat(format: WavFormat): boolean {
+  return (
+    hasValidWavPcmFields(format) &&
+    (format.bitDepth / 8) * format.channels <= format.blockAlign
+  );
+}
+
+function readWaveExtensibleFormatTag(
+  view: DataView,
+  offset: number,
+): number | null {
+  if (
+    view.getUint16(offset + 4, true) !== 0 ||
+    view.getUint16(offset + 6, true) !== 0x10 ||
+    view.getUint32(offset + 8, false) !== 0x800000aa ||
+    view.getUint32(offset + 12, false) !== 0x00389b71
+  ) {
+    return null;
+  }
+
+  const formatTag = view.getUint32(offset, true);
+  return formatTag === 1 || formatTag === 3 ? formatTag : null;
+}
+
 function calculateDuration(parsed: ParsedWav, input: AudioInput): number | null {
   const format = parsed.format;
   if (
@@ -285,21 +353,6 @@ function calculateDuration(parsed: ParsedWav, input: AudioInput): number | null 
     return (input.size ?? input.data.byteLength) / format.byteRate;
   }
   return null;
-}
-
-function createPreset(
-  id: string,
-  bitDepth: number,
-  sampleFormat: 'float' | 'integer',
-): AudioOutputPreset {
-  return Object.freeze({
-    bitDepth,
-    container: 'wav',
-    extension: 'wav',
-    id,
-    mimeType: 'audio/wav',
-    sampleFormat,
-  });
 }
 
 function invalidWav(message: string): AudioTranscoderError {

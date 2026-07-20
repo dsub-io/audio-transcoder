@@ -1,16 +1,55 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   AIFF_OUTPUT_PRESETS,
   AUDIO_TRANSCODER_PACKAGE,
   AUDIO_TRANSCODER_VERSION,
+  AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES,
   AudioTranscoderError,
   WAV_OUTPUT_PRESETS,
   audioTranscoder,
   createAudioTranscoderEngine,
   getEngineInfo,
   getVersion,
+  type AudioDecodeEstimate,
   type AudioOutputPreset,
+  type AudioStreamBuiltInInputFormatDescriptor,
+  type AudioStreamBuiltInOutputFormatDescriptor,
+  type AudioStreamBundledWasmOutputFormatDescriptor,
+  type AudioStreamInputFormatDescriptor,
+  type AudioStreamInputFormatId,
+  type AudioStreamInputSupportResult,
+  type AudioStreamIntegerOutputPresetId,
+  type AudioStreamLosslessOutputPresetDescriptor,
+  type AudioStreamLossyOutputPresetDescriptor,
+  type AudioStreamNonIntegerOutputPresetId,
+  type AudioStreamNonWavTarget,
+  type AudioStreamNonWavTranscodeResult,
+  type AudioStreamOutputFormatDescriptor,
+  type AudioStreamOutputFormatId,
+  type AudioStreamOutputProbeTarget,
+  type AudioStreamOutputPreset,
+  type AudioStreamOutputPresetDescriptor,
+  type AudioStreamOutputSupportResult,
+  type AudioStreamOutputSampleRateConstraints,
+  type AudioStreamOutputTargetConstraints,
+  type AudioStreamProcessingPrecision,
+  type AudioStreamRecognizedUnsupportedInputResult,
+  type AudioStreamRuntimeInputFormatDescriptor,
+  type AudioStreamSupportedInputResult,
+  type AudioStreamSupportedOutputResult,
+  type AudioStreamUnsupportedInputResult,
+  type AudioStreamUnsupportedOutputConfigurationResult,
+  type AudioStreamUnavailableOutputResult,
+  type AudioStreamWavTarget,
+  type AudioStreamWavTranscodeResult,
+  type AudioTranscoderCustomStreamWorkerRuntimeOptions,
+  type AudioTranscoderDefaultStreamWorkerRuntimeOptions,
   type AudioTranscoderPlugin,
+  type AudioTranscoderStreamCapabilities,
+  type AudioTranscoderStreamEngine,
+  type AudioTranscoderStreamWorkerRuntimeOptions,
+  type CreateAudioTranscoderStreamWorkerEngineOptions,
+  type CreateAudioTranscoderStreamWorkerPoolOptions,
 } from './index.js';
 import { CodecRegistry } from './codecs/codec-registry.js';
 import { DefaultAudioTranscoderEngine } from './engine/default-audio-transcoder-engine.js';
@@ -30,6 +69,10 @@ describe('public package metadata', () => {
     expect(getVersion()).toBe(AUDIO_TRANSCODER_VERSION);
   });
 
+  it('exposes the whole-buffer safety limit', () => {
+    expect(AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES).toBe(64 * 1024 * 1024);
+  });
+
   it('returns stable, immutable engine information', () => {
     const info = getEngineInfo();
 
@@ -39,6 +82,87 @@ describe('public package metadata', () => {
       version: AUDIO_TRANSCODER_VERSION,
     });
     expect(Object.isFrozen(info)).toBe(true);
+  });
+});
+
+describe('public stream type surface', () => {
+  it('exports discovery, probe, target, and format-specific result contracts', () => {
+    expectTypeOf<AudioStreamInputFormatId>().toMatchTypeOf<string>();
+    expectTypeOf<AudioStreamInputFormatDescriptor>().toMatchTypeOf<
+      | AudioStreamBuiltInInputFormatDescriptor
+      | AudioStreamRuntimeInputFormatDescriptor
+    >();
+    expectTypeOf<AudioStreamOutputFormatId>().toEqualTypeOf<
+      'flac' | 'mp3' | 'wav'
+    >();
+    expectTypeOf<AudioStreamOutputFormatDescriptor>().toMatchTypeOf<
+      | AudioStreamBuiltInOutputFormatDescriptor
+      | AudioStreamBundledWasmOutputFormatDescriptor
+    >();
+    expectTypeOf<AudioStreamOutputPresetDescriptor>().toMatchTypeOf<
+      | AudioStreamLosslessOutputPresetDescriptor
+      | AudioStreamLossyOutputPresetDescriptor
+    >();
+    expectTypeOf<AudioStreamOutputPreset['id']>().toMatchTypeOf<string>();
+    expectTypeOf<AudioStreamOutputTargetConstraints['sampleRate']>().toEqualTypeOf<
+      AudioStreamOutputSampleRateConstraints
+    >();
+    expectTypeOf<
+      AudioStreamLosslessOutputPresetDescriptor['processingPrecision']
+    >().toEqualTypeOf<AudioStreamProcessingPrecision>();
+    expectTypeOf<AudioStreamInputSupportResult>().toMatchTypeOf<
+      | AudioStreamRecognizedUnsupportedInputResult
+      | AudioStreamSupportedInputResult
+      | AudioStreamUnsupportedInputResult
+    >();
+    expectTypeOf<AudioStreamOutputProbeTarget>().toEqualTypeOf<{
+      readonly channels: number;
+      readonly presetId: AudioStreamOutputPreset['id'];
+      readonly sampleRate: number;
+    }>();
+    expectTypeOf<AudioStreamOutputSupportResult>().toMatchTypeOf<
+      | AudioStreamSupportedOutputResult
+      | AudioStreamUnavailableOutputResult
+      | AudioStreamUnsupportedOutputConfigurationResult
+    >();
+    expectTypeOf<
+      Parameters<AudioTranscoderStreamEngine['probeOutputSupport']>[0]
+    >().toEqualTypeOf<AudioStreamOutputProbeTarget>();
+    expectTypeOf<
+      Awaited<ReturnType<AudioTranscoderStreamEngine['probeOutputSupport']>>
+    >().toEqualTypeOf<AudioStreamOutputSupportResult>();
+    expectTypeOf<AudioStreamIntegerOutputPresetId>().toMatchTypeOf<string>();
+    expectTypeOf<AudioStreamNonIntegerOutputPresetId>().toMatchTypeOf<string>();
+    expectTypeOf<AudioStreamWavTarget['presetId']>().toMatchTypeOf<string>();
+    expectTypeOf<AudioStreamNonWavTarget['presetId']>().toMatchTypeOf<string>();
+    expectTypeOf<AudioStreamWavTranscodeResult['format']>().toEqualTypeOf<'wav'>();
+    expectTypeOf<AudioStreamNonWavTranscodeResult['format']>().toEqualTypeOf<
+      'flac' | 'mp3'
+    >();
+    expectTypeOf<AudioTranscoderStreamWorkerRuntimeOptions>()
+      .toMatchTypeOf<
+        | AudioTranscoderCustomStreamWorkerRuntimeOptions
+        | AudioTranscoderDefaultStreamWorkerRuntimeOptions
+      >();
+    expectTypeOf<{
+      runtime: 'custom';
+      capabilities: AudioTranscoderStreamCapabilities;
+      workerFactory: () => Worker;
+    }>().toMatchTypeOf<CreateAudioTranscoderStreamWorkerEngineOptions>();
+    expectTypeOf<{
+      runtime: 'custom';
+      capabilities: AudioTranscoderStreamCapabilities;
+      workerFactory: (workerIndex: number) => Worker;
+    }>().toMatchTypeOf<CreateAudioTranscoderStreamWorkerPoolOptions>();
+  });
+});
+
+describe('public plugin type surface', () => {
+  it('exports the exact decoder preflight estimate contract', () => {
+    expectTypeOf<AudioDecodeEstimate>().toEqualTypeOf<{
+      readonly channels: number;
+      readonly frames: number;
+    }>();
   });
 });
 
@@ -62,6 +186,7 @@ describe('built-in engine facade', () => {
       'wav-float32',
       'wav-pcm16',
       'wav-pcm24',
+      'wav-pcm32',
     ]);
     expect(capabilities.encode).toEqual(
       [...AIFF_OUTPUT_PRESETS, ...WAV_OUTPUT_PRESETS].sort((left, right) =>

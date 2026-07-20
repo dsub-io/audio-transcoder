@@ -16,6 +16,7 @@ import {
 } from './binary.js';
 import type {
   AudioCodecOperationContext,
+  AudioDecodeEstimate,
   AudioDecoderAdapter,
   AudioEncoderAdapter,
   AudioInspectorAdapter,
@@ -30,7 +31,7 @@ import { processFrameBatches } from './frame-batches.js';
 interface AiffCommon {
   readonly bitDepth: number;
   readonly channels: number;
-  readonly compression: string;
+  readonly compression: string | null;
   readonly frames: number;
   readonly sampleRate: number;
 }
@@ -44,6 +45,14 @@ interface ParsedAiff {
   readonly common: AiffCommon | null;
   readonly formType: 'AIFC' | 'AIFF';
   readonly soundData: AiffSoundData | null;
+}
+
+interface PreparedAiffDecode {
+  readonly bytesPerSample: number;
+  readonly common: AiffCommon;
+  readonly frames: number;
+  readonly soundData: AiffSoundData;
+  readonly view: DataView;
 }
 
 export const AIFF_OUTPUT_PRESETS = Object.freeze([
@@ -67,7 +76,11 @@ export const aiffInspector: AudioInspectorAdapter = Object.freeze({
 
     const parsed = parseAiff(view);
     const common = parsed.common;
-    const builtIn = common?.compression === 'NONE';
+    const uncompressed = common?.compression === 'NONE';
+    const builtIn =
+      common !== null &&
+      hasValidAiffPcmFields(common) &&
+      isSupportedAiffSampleRepresentation(common);
 
     return {
       bitDepth: common?.bitDepth ?? null,
@@ -75,21 +88,27 @@ export const aiffInspector: AudioInspectorAdapter = Object.freeze({
       codec:
         common === null
           ? 'Unknown'
-          : builtIn
-            ? 'PCM integer'
-            : `Compression ${common.compression}`,
+          : common.compression === null
+            ? 'Unknown compression'
+            : uncompressed
+              ? 'PCM integer'
+              : `Compression ${common.compression}`,
       container: parsed.formType,
       decodeSupport: builtIn ? 'built-in' : 'browser-dependent',
       durationSeconds:
-        common !== null && common.sampleRate > 0
+        common !== null &&
+        Number.isFinite(common.sampleRate) &&
+        common.sampleRate > 0
           ? common.frames / common.sampleRate
           : null,
       notes:
         common === null
           ? ['AIFF COMM chunk was not found.']
-          : parsed.soundData === null
-            ? ['AIFF SSND chunk was not found.']
-            : [],
+          : common.compression === null
+            ? ['AIFC COMM compression type was not found.']
+            : parsed.soundData === null
+              ? ['AIFF SSND chunk was not found.']
+              : [],
       sampleRate: common?.sampleRate ?? null,
     };
   },
@@ -98,50 +117,22 @@ export const aiffInspector: AudioInspectorAdapter = Object.freeze({
 export const aiffDecoder: AudioDecoderAdapter = Object.freeze({
   formats: Object.freeze(['aif', 'aifc', 'aiff']),
   id: 'builtin.aiff.decoder',
+  estimateDecodedPcm(input: AudioInput): AudioDecodeEstimate | null {
+    const prepared = prepareAiffDecode(input);
+    return prepared === null
+      ? null
+      : { channels: prepared.common.channels, frames: prepared.frames };
+  },
   async decode(
     input: AudioInput,
     context?: AudioCodecOperationContext,
   ): Promise<DecodedAudio | null> {
-    const view = new DataView(input.data);
-    if (!isAiff(view)) {
+    const prepared = prepareAiffDecode(input);
+    if (prepared === null) {
       return null;
     }
 
-    const parsed = parseAiff(view);
-    const common = parsed.common;
-    const soundData = parsed.soundData;
-    if (common === null || soundData === null) {
-      throw invalidAiff('AIFF requires both COMM and SSND chunks.');
-    }
-    if (common.compression !== 'NONE') {
-      throw new AudioTranscoderError(
-        'UNSUPPORTED_INPUT',
-        `AIFF compression "${common.compression}" is not built-in PCM.`,
-      );
-    }
-    if (
-      common.channels <= 0 ||
-      !Number.isFinite(common.sampleRate) ||
-      common.sampleRate <= 0 ||
-      common.bitDepth <= 0 ||
-      common.bitDepth % 8 !== 0
-    ) {
-      throw invalidAiff('AIFF PCM format fields are invalid.');
-    }
-
-    const bytesPerSample = common.bitDepth / 8;
-    const bytesPerFrame = common.channels * bytesPerSample;
-    const availableBytes = Math.min(
-      soundData.size,
-      Math.max(0, view.byteLength - soundData.offset),
-    );
-    const frames = Math.min(
-      common.frames,
-      Math.floor(availableBytes / bytesPerFrame),
-    );
-    if (frames === 0) {
-      throw invalidAiff('AIFF SSND chunk does not contain a complete frame.');
-    }
+    const { bytesPerSample, common, frames, soundData, view } = prepared;
 
     const channelData = Array.from(
       { length: common.channels },
@@ -262,8 +253,10 @@ function parseAiff(view: DataView): ParsedAiff {
         bitDepth: view.getUint16(dataOffset + 6, false),
         channels: view.getUint16(dataOffset, false),
         compression:
-          formType === 'AIFC' && chunkSize >= 22 && dataOffset + 22 <= view.byteLength
-            ? readAscii(view, dataOffset + 18, 4)
+          formType === 'AIFC'
+            ? chunkSize >= 22 && dataOffset + 22 <= view.byteLength
+              ? readAscii(view, dataOffset + 18, 4)
+              : null
             : 'NONE',
         frames: view.getUint32(dataOffset + 2, false),
         sampleRate: readExtended80(view, dataOffset + 8),
@@ -283,6 +276,69 @@ function parseAiff(view: DataView): ParsedAiff {
   }
 
   return { common, formType, soundData };
+}
+
+function prepareAiffDecode(input: AudioInput): PreparedAiffDecode | null {
+  const view = new DataView(input.data);
+  if (!isAiff(view)) {
+    return null;
+  }
+
+  const { common, soundData } = parseAiff(view);
+  if (common === null || soundData === null) {
+    throw invalidAiff('AIFF requires both COMM and SSND chunks.');
+  }
+  if (common.compression === null) {
+    throw invalidAiff('AIFC COMM compression type is missing.');
+  }
+  if (common.compression !== 'NONE') {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_INPUT',
+      `AIFF compression "${common.compression}" is not built-in PCM.`,
+    );
+  }
+  if (!hasValidAiffPcmFields(common)) {
+    throw invalidAiff('AIFF PCM format fields are invalid.');
+  }
+  if (!isSupportedAiffSampleRepresentation(common)) {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_INPUT',
+      `Unsupported ${common.bitDepth}-bit AIFF PCM representation.`,
+    );
+  }
+
+  const bytesPerSample = common.bitDepth / 8;
+  const bytesPerFrame = common.channels * bytesPerSample;
+  const availableBytes = Math.min(
+    soundData.size,
+    Math.max(0, view.byteLength - soundData.offset),
+  );
+  const frames = Math.min(
+    common.frames,
+    Math.floor(availableBytes / bytesPerFrame),
+  );
+  if (frames === 0) {
+    throw invalidAiff('AIFF SSND chunk does not contain a complete frame.');
+  }
+
+  return { bytesPerSample, common, frames, soundData, view };
+}
+
+function isSupportedAiffSampleRepresentation(common: AiffCommon): boolean {
+  return (
+    common.compression === 'NONE' &&
+    [8, 16, 24, 32].includes(common.bitDepth)
+  );
+}
+
+function hasValidAiffPcmFields(common: AiffCommon): boolean {
+  return (
+    common.channels > 0 &&
+    Number.isFinite(common.sampleRate) &&
+    common.sampleRate > 0 &&
+    common.bitDepth > 0 &&
+    common.bitDepth % 8 === 0
+  );
 }
 
 function createPreset(

@@ -1,187 +1,458 @@
-# Framework integration
+# Browser integration
 
-The package performs all audio work in the browser. It does not upload files or
-require a server codec process. The default Worker is created lazily on the
-first queued operation.
+`@dsub/audio-transcoder` performs audio work in the browser. A module Web Worker
+keeps codec work off the UI thread; it is not a server backend. The package
+makes no media-upload requests, and no ffmpeg installation is required. It is
+licensed for noncommercial use under
+[PolyForm Noncommercial 1.0.0](../LICENSE.md).
 
-## Production defaults
+Start with the complete [Quick Start](../README.md#quick-start). The sections
+below cover production ownership and framework-specific lifecycle differences
+without repeating that conversion flow.
 
-Use these defaults until measurements justify a change:
+The production streaming architecture has four ownership layers:
 
-- Start with `createAudioTranscoderWorkerPool({ concurrency: 1 })`.
-- Load the tool at route or component level instead of in the application root.
-- Wrap `file.arrayBuffer()` in `pool.schedule()` so queued files are not loaded
-  into memory early.
-- Pass the same `AbortSignal` to `schedule()` and the engine operation.
-- Use `transferInput: true` only after giving up ownership of the source buffer.
-- Terminate the pool when its owning page or component is disposed.
-- Revoke download object URLs and remove completed input/output references.
+1. The page or component owns one Worker pool.
+2. The pool bounds active and waiting jobs.
+3. Each scheduled job probes one concrete input, then creates one temporary
+   output destination.
+4. The page explicitly disposes result artifacts, the pool, and the output
+   session.
 
-The current API is whole-buffer based. A decoded PCM buffer uses approximately
-`frames * channels * 4` bytes before input bytes, encoded output, Worker state,
-and codec memory are counted. One minute of 48 kHz stereo PCM is about 22 MiB;
-ten minutes is about 220 MiB. Concurrent jobs multiply that working set, so
-`navigator.hardwareConcurrency` is not a safe pool-size default.
+## Recommended owner
 
-Suggested starting points:
+Create the pool and output session at the tool route or component boundary, not
+at application startup:
 
-| Workload | Concurrency | Reason |
-| --- | ---: | --- |
-| Unknown devices or mobile | 1 | Lowest predictable peak memory |
-| Large or long files | 1 | Whole input and decoded PCM coexist |
-| Measured desktop workflow with short files | 2 | Some CPU parallelism without an aggressive memory multiplier |
-| WASM codec plugins | 1 | Each Worker may own a separate WASM heap |
-
-Applications should enforce their own file-count and file-size policy. The
-engine cannot know the browser's available memory and browsers do not expose a
-portable, reliable budget API.
-
-## Browser baseline
-
-The Worker engines require module Workers, transferable `ArrayBuffer` values,
-and `AbortController`. If Workers are unavailable, the package returns a
-`WORKER_UNAVAILABLE` error instead of silently running expensive work on the
-main thread.
-
-Run consumer E2E coverage in Chromium, Firefox, and WebKit before release.
-Chromium verifies the shared engine used by Chrome, Edge, and Opera, but it does
-not replace a branded-browser check when the product promises one. Codec
-plugins, especially WASM implementations, must pass the same matrix separately.
-
-## Vite and React
-
-No Vite configuration is required. Keep the pool inside the component that
-owns the tool and release it from the effect cleanup:
-
-```tsx
-import { useEffect, useRef } from 'react';
+```ts
 import {
-  createAudioTranscoderWorkerPool,
-  type AudioTranscoderWorkerPool,
+  createAudioTranscoderOutputSession,
+  createAudioTranscoderStreamWorkerPool,
 } from '@dsub/audio-transcoder';
 
-export function AudioTool() {
-  const poolRef = useRef<AudioTranscoderWorkerPool | null>(null);
+export function createAudioToolRuntime() {
+  const pool = createAudioTranscoderStreamWorkerPool({
+    concurrency: 1,
+    idleTimeoutMs: 30_000,
+    maxQueued: 8,
+  });
+  const outputSession = createAudioTranscoderOutputSession({
+    memoryLimitBytes: 128 * 1024 * 1024,
+    namespace: 'dsub-audio-transcoder',
+  });
 
-  useEffect(() => {
-    const pool = createAudioTranscoderWorkerPool({ concurrency: 1 });
-    poolRef.current = pool;
+  let disposal: Promise<void> | undefined;
 
-    return () => {
-      pool.terminate();
-      if (poolRef.current === pool) poolRef.current = null;
-    };
-  }, []);
+  function dispose(): Promise<void> {
+    window.removeEventListener('pagehide', handlePageHide);
+    disposal ??= (async () => {
+      // Abort row-level controllers before calling this method.
+      await pool.dispose();
+      await outputSession.dispose();
+    })();
+    return disposal;
+  }
 
-  // Event handlers use poolRef.current.
+  function handlePageHide(event: PageTransitionEvent): void {
+    if (!event.persisted) void dispose().catch(() => undefined);
+  }
+
+  window.addEventListener('pagehide', handlePageHide);
+
+  return {
+    dispose,
+    outputSession,
+    pool,
+  };
+}
+
+const runtime = createAudioToolRuntime();
+```
+
+The order matters. `pool.dispose()` waits for active output streams to abort and
+release writer locks; only then should `outputSession.dispose()` remove OPFS
+entries. Both methods are idempotent. `terminate()` remains available on a
+stream Worker or pool as fire-and-forget compatibility, but it is not a
+completion barrier.
+
+## Capability-driven controls
+
+### Input
+
+`pool.getCapabilities()` is synchronous because it returns an immutable local
+manifest. `inputFormats` lists installed recognition paths plus extension and
+MIME hints for picker UI. It does not establish that a selected file is
+decodable. In particular, entries with `path: 'runtime-probed'` depend on the
+container codec and current browser runtime. See the compact
+[input candidate table](../README.md#input-discovery-and-probing); every concrete
+file still requires `probeInputSupport()`.
+
+Probe every file asynchronously before enabling conversion, as shown in the
+Quick Start. Treat `recognized-unsupported` as a recognized container whose
+codec cannot be decoded in this runtime, and `unsupported` as unrecognized.
+
+`probeInputSupport()` reads enough metadata to identify the source and asks the
+installed decoder path whether it can decode that codec. Runtime decoders
+validate at most the first decoded sample within the configured
+`inputReadBytes` read budget. If the budget is exhausted before that verdict,
+the Promise rejects with
+`AudioTranscoderError.code === 'RESOURCE_LIMIT_EXCEEDED'`. Do not translate
+that rejection to `recognized-unsupported` or `unsupported`; increase the
+budget within its documented limit or report that the probe was inconclusive.
+Treat filename extensions, MIME values, and `inputFormats` as picker/parser
+hints only, including entries marked `built-in-pcm`.
+
+Do not use a browser brand, user-agent string, `hardwareConcurrency`, or
+`deviceMemory` to claim that a concrete input codec is supported. Only
+`probeInputSupport()` can make that decision for the selected file in the
+current runtime.
+
+### Output
+
+The installed output manifest is deterministic, but runtime availability is
+not. The manifest exposes built-in eager WAV PCM16/24/32 and float32 presets,
+lazy bundled-WASM MP3
+128/192/256/320-kbps presets, and lazy bundled-WASM FLAC 16/24-bit presets. The
+exact preset IDs, codec constraints, implementation, loading mode, extension,
+MIME type, and seekable-output requirement are under `outputFormats`.
+
+Build controls from those descriptors instead of maintaining a second support
+list:
+
+```ts
+import type { AudioStreamOutputPresetId } from '@dsub/audio-transcoder';
+
+const outputOptions = runtime.pool
+  .getCapabilities()
+  .outputFormats.flatMap((format) =>
+    format.presets.map((descriptor) => ({
+      channels: descriptor.target.channels,
+      effectiveIntegerPrecisionBits:
+        descriptor.kind === 'lossless'
+          ? descriptor.processingPrecision.effectiveIntegerPrecisionBits
+          : null,
+      format: format.id,
+      implementation: format.implementation,
+      loading: format.loading,
+      mimeType: format.mimeType,
+      presetId: descriptor.preset.id as AudioStreamOutputPresetId,
+      sampleRate: descriptor.target.sampleRate,
+    })),
+  );
+
+type Availability =
+  | { state: 'checking' }
+  | { state: 'available' }
+  | { state: 'unavailable'; reason: string }
+  | { state: 'error'; reason: string };
+
+function supportsTarget(
+  option: (typeof outputOptions)[number],
+  channels: number,
+  sampleRate: number,
+): boolean {
+  const rate = option.sampleRate;
+  return (
+    channels >= option.channels.minimum &&
+    channels <= option.channels.maximum &&
+    (rate.kind === 'range'
+      ? sampleRate >= rate.minimum && sampleRate <= rate.maximum
+      : rate.values.some((value) => value === sampleRate))
+  );
+}
+
+async function probeOutputOption(
+  option: (typeof outputOptions)[number],
+  channels: number,
+  sampleRate: number,
+  signal: AbortSignal,
+  render: (availability: Availability) => void,
+): Promise<void> {
+  if (!supportsTarget(option, channels, sampleRate)) {
+    render({ state: 'unavailable', reason: 'Unsupported target settings' });
+    return;
+  }
+
+  render({ state: 'checking' });
+  try {
+    const result = await runtime.pool.probeOutputSupport(
+      { presetId: option.presetId, channels, sampleRate },
+      { signal },
+    );
+    render(
+      result.status === 'supported'
+        ? { state: 'available' }
+        : { state: 'unavailable', reason: result.message },
+    );
+  } catch (error) {
+    if (signal.aborted) return;
+    render({
+      state: 'error',
+      reason: error instanceof Error ? error.message : 'Output probe failed',
+    });
+  }
 }
 ```
 
-For an optional tool, lazy-load the route or component. For a dedicated tool
-route, route-level splitting is normally enough; the Worker payload still does
-not load until the first operation. Do not add this package to
-`optimizeDeps.exclude` unless a measured Vite issue requires it.
+Static constraints are available synchronously and should immediately disable
+invalid channel/rate combinations. Runtime probing is asynchronous: reset the
+state when any target field changes, render `checking`, and disable conversion
+until that exact `{ presetId, channels, sampleRate }` resolves to `supported`.
+Both `unsupported-configuration` and `runtime-unavailable` are unavailable UI
+states. A rejected Promise is a distinct retryable error state; never use it to
+permanently gray the option.
 
-## Next.js App Router
+`probeOutputSupport()` performs a tiny bounded discard-only encode. It does not
+read an input, create OPFS state or an artifact, or invoke the resampler. Static
+mismatches return before a lazy codec is loaded. Identical requests coalesce;
+one probe runs at a time, at most eight unique targets wait, and 32 successful
+exact targets are cached. Unsupported results and rejected probes are not
+cached, so error UI can retry them. Independent callers may cancel without
+stopping shared work until the last subscriber leaves.
 
-Put Worker operations in a Client Component. Importing the package is SSR-safe,
-but creating or using browser Workers on the server is not:
+Do not use browser or device heuristics to replace this probe. Probe concrete
+files with `probeInputSupport()` and exact output targets with
+`probeOutputSupport()`. `hardwareConcurrency` and `deviceMemory` may only help
+tune queue or concurrency settings after measurement on representative files;
+the default and recommended concurrency remains `1`.
 
-```tsx
-'use client';
+Neither probe adds a wall-clock deadline. Compose the route or row lifecycle
+`AbortSignal` with an application deadline so a stalled browser codec API
+becomes a retryable error state. Keep explicit unsupported results separate from
+deadline, cancellation, Worker, and resource-limit rejections.
 
-import { useEffect, useRef } from 'react';
-import {
-  createAudioTranscoderWorkerPool,
-  type AudioTranscoderWorkerPool,
-} from '@dsub/audio-transcoder';
+Probe the selected exact target first. If controls must be preflighted, probe
+their offered exact targets sequentially and apply each verdict only to that
+target. Probing MP3 or FLAC intentionally downloads its lazy codec chunk; defer
+those probes until interaction for a smaller initial transfer. Never launch all
+output probes concurrently.
 
-export function AudioTranscoderClient() {
-  const poolRef = useRef<AudioTranscoderWorkerPool | null>(null);
+Every current WAV preset accepts 1-32 channels and 8,000-384,000 Hz. MP3 accepts
+1-2 channels: `mp3-128kbps` accepts exactly 16,000, 22,050, 24,000, 32,000,
+44,100, and 48,000 Hz; `mp3-192kbps`, `mp3-256kbps`, and `mp3-320kbps` accept
+exactly 32,000, 44,100, and 48,000 Hz. Lower-rate combinations are excluded
+because LAME can silently downgrade the encoded bitrate instead of honoring the
+requested preset. FLAC accepts 1-8 channels and the descriptor's eleven
+discrete rates from 8,000 through 192,000 Hz. Read the concrete discrete arrays
+from `descriptor.target.sampleRate.values`; do not infer values from only their
+minimum and maximum.
 
-  useEffect(() => {
-    const pool = createAudioTranscoderWorkerPool({ concurrency: 1 });
-    poolRef.current = pool;
-    return () => {
-      pool.terminate();
-      poolRef.current = null;
-    };
-  }, []);
+If `target.sampleRate` differs from the source rate, the global resampler limit
+also applies. Read `capabilities.limits.sampleRate.resampling` for conversion
+and `capabilities.limits.sampleRate.passThrough` for same-rate output. The
+default manifest exposes 8,000-192,000 Hz for resampling and 8,000-384,000 Hz
+for pass-through.
 
-  // Render file controls and run work from client event handlers.
+All processing between decode and encode uses Float32 PCM. Consequently,
+`wav-pcm32` is a 32-bit signed-integer container but retains at most 24 bits of
+integer precision. The manifest reports this explicitly through
+`processingPrecision.effectiveIntegerPrecisionBits`.
+
+## Scheduling multiple files
+
+Use `schedule()` for a batch and create the output only after a Worker slot is
+available:
+
+```ts
+async function transcodeOne(
+  file: File,
+  signal: AbortSignal,
+) {
+  return runtime.pool.schedule(
+    async (engine) => {
+      const input = { blob: file, name: file.name };
+      const support = await engine.probeInputSupport(input, { signal });
+      if (support.status !== 'supported') {
+        throw new Error(`Input support: ${support.status}`);
+      }
+
+      const pending = await runtime.outputSession.create();
+      try {
+        const result = await engine.transcode(
+          input,
+          { presetId: 'mp3-192kbps', sampleRate: 48_000 },
+          pending.stream,
+          {
+            signal,
+            onProgress: ({ phase, progress }) => {
+              console.log(phase, progress);
+            },
+          },
+        );
+
+        return await pending.complete({
+          mimeType: result.preset.mimeType,
+          name: replaceExtension(file.name, result.preset.extension),
+        });
+      } catch (error) {
+        await pending.discard();
+        throw error;
+      }
+    },
+    { signal },
+  );
+}
+
+function replaceExtension(name: string, extension: string): string {
+  const dot = name.lastIndexOf('.');
+  const stem = dot > 0 ? name.slice(0, dot) : name;
+  return `${stem}.${extension}`;
 }
 ```
 
-The validated Next.js/Turbopack path needs no `transpilePackages`, custom
-webpack callback, or public Worker copy. If the engine should load only after a
-user action, call `await import('@dsub/audio-transcoder')` inside the Client
-Component. Keep the pool in a ref and still terminate it on unmount.
+Pass the same `AbortSignal` to `schedule()`, `probeInputSupport()`, and
+`transcode()`. The pool is FIFO, creates Workers lazily, and releases idle
+Workers after 30 seconds by default.
 
-For dsub, the intended boundary is a server-rendered `/tools/audio-transcoder`
-page containing one focused Client Component. The queue rows, retry policy,
-download state, and user-visible progress stay in `dsub-io/web`; the engine
-package remains UI-independent.
+A running `OPERATION_ABORTED` rejection retires the affected pool Worker before
+the slot is reused. A `schedule()` callback must discard its owned output and
+rethrow that error. Standalone Worker-engine consumers must instead await
+`dispose()`, create a replacement, and only then retry.
 
-## Vue
+A waiting `schedule()` callback retains references it captures, including its
+source `File` or `Blob`, but the example does not open output storage or read the
+file into an `ArrayBuffer` until a slot is active. Direct `pool.transcode()`
+accepts a destination before admission; the pool aborts that destination if the
+job is rejected, cancelled while queued, disposed, or fails during Worker
+startup. Prefer `schedule()` for batches so storage ownership begins with active
+work.
 
-Keep the pool as a non-reactive local value. Create it on mount and terminate it
-on unmount:
+`concurrency` defaults to `1` and must be from `1` through `4`. `maxQueued`
+defaults to `8` and must be from `0` through `64`; active operations are not
+counted. A full queue rejects immediately with
+`AudioTranscoderError.code === 'QUEUE_CAPACITY_EXCEEDED'`. Use
+`pool.getQueueSnapshot()` for UI state and apply retry policy in the consuming
+application.
 
-```vue
-<script setup lang="ts">
-import { onMounted, onUnmounted } from 'vue';
-import {
-  createAudioTranscoderWorkerPool,
-  type AudioTranscoderWorkerPool,
-} from '@dsub/audio-transcoder';
+Keep `concurrency: 1` for unknown devices, mobile, long files, and bundled WASM
+output. This is also the manifest's `recommendedConcurrency`. Each active slot
+can own a browser decoder, a codec Worker, and a separate WASM heap. Raise
+concurrency only after measuring representative files on target devices; never
+derive codec support or an automatic pool size from device hints alone.
 
-let pool: AudioTranscoderWorkerPool | undefined;
+## Output storage lifecycle
 
-onMounted(() => {
-  pool = createAudioTranscoderWorkerPool({ concurrency: 1 });
-});
+`createAudioTranscoderOutputSession()` returns an application-owned temporary
+storage boundary:
 
-onUnmounted(() => {
-  pool?.terminate();
-  pool = undefined;
-});
-</script>
+- `session.create()` returns a tracked `pending` destination.
+- Pass `pending.stream` directly to `transcode()`.
+- After successful stream closure, `pending.complete({ name, mimeType })`
+  returns an artifact containing a `Blob` or `File` snapshot.
+- On failure or cancellation, `await pending.discard()` aborts and removes the
+  incomplete destination.
+- `await artifact.dispose()` removes its backing storage or releases its memory
+  reservation. Treat `artifact.blob` as unusable as soon as disposal starts.
+- `await session.dispose()` settles every pending output and artifact and then
+  removes the session directory.
+
+An OPFS-backed `artifact.blob` is guaranteed readable only until
+`artifact.dispose()` starts because disposal removes its backing file. The API
+makes no post-disposal readability guarantee for memory-backed artifacts
+either. `URL.createObjectURL(artifact.blob)` adds no application-level copy, but
+the memory fallback's `complete()` materializes a Blob and reserves output-sized
+copy headroom. Revoke each object URL before awaiting artifact disposal. Failed
+cleanup remains session-tracked and is retried by `session.dispose()`.
+
+The session prefers the
+[origin private file system](https://developer.mozilla.org/en-US/docs/Web/API/File_System_API/Origin_private_file_system).
+OPFS is origin-private persistent storage; closing a tab does not guarantee its
+contents disappear. If OPFS cannot be opened, the session uses paged memory.
+`memoryLimitBytes` is a hard aggregate reservation shared by pending and
+completed memory outputs; Blob completion also reserves output-sized copy
+headroom. The default is 128 MiB. This package does not request persistent
+storage through `navigator.storage.persist()`.
+
+Each OPFS session writes a lease and cleans managed orphan directories when the
+next session starts. [Web Locks](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API)
+prevent one tab from deleting another tab's active session. If Web Locks are
+unavailable, cleanup falls back to lease age and reclaims only managed sessions
+whose heartbeat is older than seven days. Cleanup never scans outside the
+configured namespace.
+
+For an integrated transcoder, leave `disposeOnPageHide` at its default `false`.
+Install one app-level
+[`pagehide`](https://developer.mozilla.org/en-US/docs/Web/API/Window/pagehide_event)
+handler that starts the shared `dispose()` method, preserving the strict order
+`await pool.dispose()` then `await outputSession.dispose()`. Otherwise the
+session's handler could race an independently owned Worker output lock. The
+session option is only a convenience when the session has no independently
+owned active writers.
+
+Browsers do not wait for the app-level handler's Promise, so it remains
+best-effort crash recovery rather than a replacement for explicitly awaiting
+`dispose()`. A BFCache transition has `event.persisted === true`; leave that
+runtime active so it remains usable when the page is restored.
+
+## Memory boundaries
+
+The stream operation settings have narrow meanings:
+
+| Setting | Default | Bounds |
+| --- | ---: | ---: |
+| `inputReadBytes` | 8 MiB | 64 KiB-64 MiB |
+| `pcmChunkBytes` | 4 MiB | 64 KiB-64 MiB |
+| `outputChunkBytes` | 4 MiB | 64 KiB-64 MiB |
+
+These are per-read or per-yield allocation bounds, not a total working-set or
+WASM limit. They exclude browser decoder state, MediaBunny caches and queues,
+resampler state, nested codec Workers, WASM heaps, source Blobs, output storage,
+and garbage awaiting browser collection. The API cannot guarantee that a device
+will not run out of memory.
+
+Do not call `file.arrayBuffer()` before scheduling a streaming job. Do not use
+`navigator.hardwareConcurrency` as an automatic pool size. Release object URLs,
+artifacts, input references, Workers, and sessions as soon as ownership ends.
+
+## Bundling and CSP
+
+The default stream Worker is a package module Worker. WAV encoding is part of
+the eager Worker payload. The official
+[MediaBunny MP3 extension](https://mediabunny.dev/guide/extensions/mp3-encoder)
+and [MediaBunny FLAC extension](https://mediabunny.dev/guide/extensions/flac-encoder)
+are separate dynamic imports inside that Worker. Selecting WAV does not load
+either extension. The first MP3 or FLAC job loads and registers only its chosen
+extension; concurrent first calls share that initialization.
+
+`@alexanderolsen/libsamplerate-js` is also a separate dynamic import. Its
+current distribution is asm.js, despite the codec extensions being WASM. A
+same-rate job takes the pass-through path and does not request the resampler
+chunk; the first job whose target rate differs from its source rate loads it.
+
+The consumer bundler must preserve dynamic imports in its production Worker
+output. For Vite, configure `worker.format: 'es'`; the default IIFE Worker format
+may inline the extension modules and resampler payload into the eager Worker.
+That output remains functional but increases the initial resource cost.
+
+The extension distributions include their nested Blob Worker and LAME or
+libFLAC WASM code. They do not fetch a codec from a CDN, require a public WASM
+path, or send media to a server.
+
+A strict policy for all output formats needs:
+
+```http
+Content-Security-Policy:
+  script-src 'self' 'wasm-unsafe-eval';
+  worker-src 'self' blob:
 ```
 
-Use a lazy route or `defineAsyncComponent()` when the tool is optional. In an
-SSR Vue application, keep file and Worker operations in mounted client code. If
-the pool must live in reactive state, wrap it with `shallowRef()` or `markRaw()`
-instead of deep proxying it.
+The same-origin stream Worker uses `worker-src 'self'`. The extra `blob:` Worker
+source and `'wasm-unsafe-eval'` script source are required only when the bundled
+MP3/FLAC encoder extensions run. See MDN for
+[`worker-src`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/worker-src)
+and [`script-src`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/script-src).
 
-## Other component systems
-
-The ownership rule is the same everywhere:
-
-| Environment | Create | Dispose |
-| --- | --- | --- |
-| Svelte | Component initialization or `onMount` | `onDestroy` |
-| Angular | `ngOnInit` or a component-scoped service | `ngOnDestroy` |
-| Vanilla JavaScript | Tool initialization | Explicit `dispose()` or `pagehide` |
-| Storybook | Inside the rendered story component | Component unmount cleanup |
-
-Do not keep a global pool unless the application intentionally wants a
-cross-route queue. A global pool makes cancellation, stale UI updates, and
-memory ownership harder to reason about.
-
-## Custom Worker entry
-
-The default package Worker URL should be preferred. If a bundler or Content
-Security Policy requires an application-owned entry, add a local file:
+If an application must own the Worker entry, create a local module:
 
 ```ts
 // audio-transcoder.worker.ts
-import '@dsub/audio-transcoder/worker';
+import '@dsub/audio-transcoder/stream-worker';
 ```
 
-Then provide the module Worker explicitly:
+Then provide it explicitly:
 
 ```ts
-const pool = createAudioTranscoderWorkerPool({
+const pool = createAudioTranscoderStreamWorkerPool({
   concurrency: 1,
   workerFactory: () =>
     new Worker(new URL('./audio-transcoder.worker.ts', import.meta.url), {
@@ -191,25 +462,184 @@ const pool = createAudioTranscoderWorkerPool({
 });
 ```
 
-Default production builds emit a same-origin Worker asset, so a CSP normally
-needs `worker-src 'self'`. Add `blob:` only if the consumer's bundler actually
-emits blob Worker URLs.
+`workerFactory` alone changes only the URL/CSP-owned entry; it still declares the
+package's default runtime and therefore exposes the built-in capability
+manifest. The entry above must import `@dsub/audio-transcoder/stream-worker`.
+
+For a custom codec runtime, couple the custom Worker and its matching immutable
+manifest explicitly:
+
+```ts
+const pool = createAudioTranscoderStreamWorkerPool({
+  concurrency: 1,
+  runtime: 'custom',
+  capabilities: customCapabilities,
+  workerFactory: () =>
+    new Worker(new URL('./custom-audio-runtime.worker.ts', import.meta.url), {
+      name: 'custom-audio-runtime',
+      type: 'module',
+    }),
+});
+```
+
+Construct `createAudioTranscoderStreamEngine({ codecRuntime })` inside that
+custom Worker. Adapters contain functions and may own module or WASM state, so
+they are not structured-clone values. Supplying `capabilities` without
+`runtime: 'custom'` and a `workerFactory` is an `INVALID_CONFIGURATION` error.
+Every `workerFactory(workerIndex)` slot in a custom pool must expose the same
+declared runtime and capability manifest. Do not use the slot index to mix codec
+implementations or availability: capability discovery and output probe results
+are pool-wide and assume homogeneous Worker slots.
+
+## Framework ownership
+
+In every framework, abort stale probes when the target changes, keep conversion
+disabled while checking, and dispose in pool-then-session order.
+
+### Vite bundling
+
+This complete config keeps MP3, FLAC, and the resampler as separate production
+Worker chunks:
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  worker: { format: 'es' },
+});
+```
+
+Without `worker.format: 'es'`, behavior remains correct but Vite may inline lazy
+codec and resampler modules into its IIFE Worker output.
+
+### Vanilla
+
+Create `createAudioToolRuntime()` when mounting the tool route. Retain its
+download cleanup handles, abort active controllers, release those handles, then
+await `runtime.dispose()` before replacing the route DOM. The app-level
+`pagehide` handler remains best-effort crash cleanup.
+
+### React
+
+Keep the runtime in a ref rather than state and create it in an effect. Effect
+cleanup cannot await, so start idempotent cleanup there and expose a separate
+async navigation action when writer-lock release must be observed:
+
+```tsx
+const runtimeRef = useRef<ReturnType<typeof createAudioToolRuntime> | null>(null);
+
+useEffect(() => {
+  const owned = createAudioToolRuntime();
+  runtimeRef.current = owned;
+
+  return () => {
+    if (runtimeRef.current === owned) runtimeRef.current = null;
+    void owned.dispose();
+  };
+}, []);
+```
+
+In Storybook, own the runtime inside the rendered story and verify a real Worker
+conversion in both development and the production Storybook build.
+
+### Next.js App Router
+
+Put the owner behind `'use client'`, but still create the runtime in an effect or
+browser event rather than at module scope. Package metadata is SSR-safe; `File`,
+Worker, OPFS, and object-URL operations are not. A dedicated route can use normal
+route splitting; interaction-only loading may use
+`await import('@dsub/audio-transcoder')`. Verify Worker and lazy chunk URLs from
+the deployed base path before adding `transpilePackages` or webpack overrides.
+
+### Vue
+
+Create the runtime in `onMounted()` and hold it in a non-reactive local binding,
+`shallowRef()`, or `markRaw()`. `onUnmounted()` cannot await framework teardown;
+start idempotent cleanup there and provide an explicit async shutdown action
+when navigation must wait for disposal.
+
+Do not keep a global pool unless the product intentionally wants a cross-route
+queue. A global owner makes cancellation, stale UI updates, output URLs, and
+storage lifetime harder to reason about.
+
+## Browser validation
+
+The stream path requires module Workers, transferable `WritableStream` values,
+`Blob`, and `AbortController`. OPFS and Web Locks are progressive enhancements;
+the bounded memory fallback remains available when OPFS initialization fails.
+
+Test the actual Worker path in Chromium, Firefox, and WebKit. Chromium covers
+the engine shared by Chrome, Edge, and Opera, but does not replace branded-
+browser checks when the product promises them. Runtime-probed input codecs can
+differ by engine, operating system, and browser version, so matrix tests must
+assert that each file's `probeInputSupport()` result agrees with whether
+transcoding is enabled rather than hard-code universal decode support.
+
+Output candidates and static constraints are package-owned; current runtime
+availability is probed. Matrix tests should call `probeOutputSupport()` for
+exact targets, then write a small file for every WAV, MP3, and FLAC preset,
+parse the resulting header, test cancellation and queue saturation, and
+exercise OPFS only where the runtime provides it.
+
+## Whole-buffer compatibility
+
+`createAudioTranscoderEngine()`, `createAudioTranscoderWorkerEngine()`, and
+`createAudioTranscoderWorkerPool()` remain available for short inputs. They
+accept complete `ArrayBuffer` input and return complete decoded or encoded
+buffers.
+
+Built-in whole-buffer support is:
+
+- Inspect WAV, AIFF/AIFC, CAF, FLAC, and MP3 headers.
+- Decode PCM WAV, uncompressed AIFF/AIFC, and LPCM CAF.
+- Encode WAV integer 16/24/32-bit, WAV float32, and AIFF integer 16/24-bit.
+- Transcode between a built-in PCM decoder and built-in encoder without hidden
+  resampling or channel mixing.
+
+Whole-buffer operations default to a 64 MiB guard for complete input and unique
+PCM backing stores. Built-in WAV, AIFF/AIFC, and CAF decoders estimate expanded
+planar Float32 bytes from headers and reject before allocation. Custom decoder
+plugins should implement `estimateDecodedPcm()` to get the same preflight;
+without it, only the post-decode guard is possible. `unsafeAllowLargeBuffers`
+is an explicit bypass, not OOM protection.
+
+Whole-buffer Worker engines and pools also use a bounded queue: `maxQueued`
+defaults to `8`, has a maximum of `64`, and reports
+`QUEUE_CAPACITY_EXCEEDED` when full. `maxQueuedBytes` defaults to 64 MiB and
+counts only waiting operations; active operations are excluded. Complete input
+buffers and unique PCM backing buffers are counted conservatively. The current
+and configured values are exposed as `queuedBytes` and `maxQueuedBytes` in pool
+snapshots. `unsafeAllowLargeBuffers` does not bypass this aggregate queue limit.
+
+Pool concurrency defaults to `1` and has a maximum of `4`. Arbitrary values
+captured by `schedule()` closures cannot be measured and therefore contribute
+zero to `queuedBytes`; call `file.arrayBuffer()` inside the callback after a
+slot is available. The whole-buffer lifecycle retains `terminate()`; it does
+not own the seekable streaming output locks covered by async stream `dispose()`.
+
+## Third-party distribution
+
+Production bundles can contain MediaBunny code plus embedded LAME or libFLAC
+codec payloads and the libsamplerate resampler. Publish
+`THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_LICENSES/` with the application,
+and retain the exact source/build references listed there. The notice records
+the audited dependency revisions and distribution considerations; it is not
+legal advice.
 
 ## Consumer release gate
 
-Run both development and production paths because Worker asset handling can
-differ between them:
+Verify development and production builds because Worker and dynamic-import
+asset handling can differ:
 
-1. Build the consuming application.
-2. Serve the production output from its normal base path.
-3. Run one real Worker encode or transcode in a browser.
-4. Confirm progress reaches `1`, cancellation settles, and no console errors
-   occur.
-5. Confirm the Worker asset returns JavaScript rather than an HTML fallback.
-6. Repeat the interaction in the development server.
-
-For Storybook, test the built Storybook in addition to the development server.
-The story should perform a tiny real encode and terminate its pool on unmount.
-
-The `0.0.1` package tarball has been exercised in Vite 8.1.5 with Vue 3.5.40
-and in Next.js 16.2.9 with Turbopack, in both development and production modes.
+1. Build and serve the consumer from its real base path.
+2. Probe a concrete input and the selected exact output target before enabling
+   conversion.
+3. Run one real Worker conversion for WAV, MP3, and FLAC.
+4. Confirm progress reaches `1`, cancellation settles, and downloads parse.
+5. Confirm the main Worker and lazy codec chunks return JavaScript, not an HTML
+   fallback, and that no codec request targets a CDN.
+6. Confirm the deployed CSP allows the main Worker and, when enabled, the nested
+   Blob Worker and WASM compilation.
+7. Await runtime disposal and verify no output writer remains locked.
+8. Repeat the interaction in the development server and built Storybook.

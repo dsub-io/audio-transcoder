@@ -10,6 +10,7 @@ import type {
 } from '../engine/contracts.js';
 import type {
   AudioCodecOperationContext,
+  AudioDecodeEstimate,
   AudioDecoderAdapter,
   AudioEncoderAdapter,
   AudioInspectorAdapter,
@@ -25,6 +26,8 @@ interface RegisteredEncoder {
   readonly adapter: AudioEncoderAdapter;
   readonly preset: AudioOutputPreset;
 }
+
+type DecodePreflight = (estimate: AudioDecodeEstimate) => void;
 
 export class CodecRegistry {
   readonly #capabilities: AudioTranscoderCapabilities;
@@ -61,9 +64,23 @@ export class CodecRegistry {
   async decode(
     input: AudioInput,
     context: AudioCodecOperationContext,
+    preflight?: DecodePreflight,
   ): Promise<DecodedAudio> {
     for (const decoder of this.#decoders) {
       context.throwIfAborted();
+      if (decoder.estimateDecodedPcm !== undefined) {
+        const estimate: unknown = await decoder.estimateDecodedPcm(
+          input,
+          context,
+        );
+        context.throwIfAborted();
+        if (estimate === null) {
+          continue;
+        }
+        assertValidDecodeEstimate(decoder.id, estimate);
+        preflight?.(estimate);
+      }
+
       const result = await decoder.decode(input, context);
       if (result !== null) {
         return freezeDecodedAudio(result);
@@ -96,6 +113,41 @@ export class CodecRegistry {
   getCapabilities(): AudioTranscoderCapabilities {
     return this.#capabilities;
   }
+}
+
+function assertValidDecodeEstimate(
+  decoderId: string,
+  estimate: unknown,
+): asserts estimate is AudioDecodeEstimate {
+  if (typeof estimate !== 'object' || estimate === null) {
+    throw invalidDecodeEstimate(decoderId);
+  }
+
+  const candidate = estimate as Partial<AudioDecodeEstimate>;
+  if (
+    !isSafeIntegerAtLeast(candidate.channels, 1) ||
+    !isSafeIntegerAtLeast(candidate.frames, 0)
+  ) {
+    throw invalidDecodeEstimate(decoderId);
+  }
+}
+
+function isSafeIntegerAtLeast(
+  value: unknown,
+  minimum: number,
+): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isSafeInteger(value) &&
+    value >= minimum
+  );
+}
+
+function invalidDecodeEstimate(decoderId: string): AudioTranscoderError {
+  return new AudioTranscoderError(
+    'INVALID_CONFIGURATION',
+    `Decoder "${decoderId}" returned an invalid decoded PCM estimate.`,
+  );
 }
 
 function assertUniqueIds(
