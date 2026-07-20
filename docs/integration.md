@@ -216,6 +216,11 @@ files with `probeInputSupport()` and exact output targets with
 tune queue or concurrency settings after measurement on representative files;
 the default and recommended concurrency remains `1`.
 
+Neither probe adds a wall-clock deadline. Compose the route or row lifecycle
+`AbortSignal` with an application deadline so a stalled browser codec API
+becomes a retryable error state. Keep explicit unsupported results separate from
+deadline, cancellation, Worker, and resource-limit rejections.
+
 Probe the selected exact target first. If controls must be preflighted, probe
 their offered exact targets sequentially and apply each verdict only to that
 target. Probing MP3 or FLAC intentionally downloads its lazy codec chunk; defer
@@ -298,6 +303,11 @@ function replaceExtension(name: string, extension: string): string {
 Pass the same `AbortSignal` to `schedule()`, `probeInputSupport()`, and
 `transcode()`. The pool is FIFO, creates Workers lazily, and releases idle
 Workers after 30 seconds by default.
+
+A running `OPERATION_ABORTED` rejection retires the affected pool Worker before
+the slot is reused. A `schedule()` callback must discard its owned output and
+rethrow that error. Standalone Worker-engine consumers must instead await
+`dispose()`, create a replacement, and only then retry.
 
 A waiting `schedule()` callback retains references it captures, including its
 source `File` or `Blob`, but the example does not open output storage or read the

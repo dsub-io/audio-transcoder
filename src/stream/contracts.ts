@@ -186,7 +186,8 @@ export interface AudioStreamOperationOptions {
   readonly onProgress?: (progress: AudioStreamProgress) => void;
   /**
    * Cancels queued or running work. Rejection uses `OPERATION_ABORTED`; a
-   * transcoding operation also aborts its output stream.
+   * transcoding operation also aborts its output stream. No wall-clock deadline
+   * is added; UI probes should compose this signal with an application deadline.
    */
   readonly signal?: AbortSignal;
 }
@@ -261,7 +262,8 @@ export interface AudioTranscoderStreamEngine {
   /**
    * Probes headers and validates the installed decoder with at most the first
    * decoded sample inside the configured read budget. Support states resolve as
-   * values.
+   * values. Browser decoder checks honor `options.signal`; use an application
+   * deadline because browser codec APIs are runtime-owned.
    *
    * @throws Invalid input or options, `OPERATION_ABORTED`,
    * `RESOURCE_LIMIT_EXCEEDED`, or `QUEUE_CAPACITY_EXCEEDED` for rejected
@@ -313,7 +315,9 @@ export interface AudioTranscoderStreamWorkerEngine
   extends AudioTranscoderStreamEngine {
   /**
    * Cancels pending work and resolves after output aborts release writer locks.
-   * The instance is terminal. Repeated calls return the same promise.
+   * The instance is terminal. Repeated calls return the same promise. After a
+   * running abort, standalone consumers should dispose this engine before
+   * creating a replacement; Worker pools retire the affected slot automatically.
    */
   dispose(): Promise<void>;
   /** Starts terminal cleanup without waiting for output writer lock release. */

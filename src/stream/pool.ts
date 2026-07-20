@@ -42,7 +42,7 @@ export interface AudioTranscoderStreamQueueSnapshot {
 }
 
 export interface AudioTranscoderStreamPoolScheduleOptions {
-  /** Cancels queued work. Running work must also receive this signal. */
+  /** Cancels queued work. Running work must also receive and propagate it. */
   readonly signal?: AbortSignal;
 }
 
@@ -52,7 +52,9 @@ export interface AudioTranscoderStreamWorkerPool
 
   /**
    * Runs only after a Worker slot is available. Open the destination file in
-   * this callback so queued jobs do not retain writable file streams.
+   * this callback so queued jobs do not retain writable file streams. A running
+   * `OPERATION_ABORTED` rejection retires that Worker before the slot is reused;
+   * clean up locally, then propagate that error from the callback.
    */
   schedule<T>(
     operation: (engine: AudioTranscoderStreamWorkerEngine) => Promise<T>,
@@ -275,12 +277,25 @@ export function createAudioTranscoderStreamWorkerPool(
     operation: QueuedOperation,
     error: unknown,
   ): void => {
-    slot.active = false;
     slot.operation = undefined;
     operation.reject(error);
     if (isFatalWorkerError(error)) {
+      slot.active = false;
       void shutdown(error);
+    } else if (isOperationAbortedError(error) && slot.engine !== undefined) {
+      const retiredEngine = slot.engine;
+      slot.engine = undefined;
+      const finishRetirement = (): void => {
+        slot.active = false;
+        if (!terminated) {
+          drain();
+        }
+      };
+      void Promise.allSettled([disposeWorkerEngine(retiredEngine)]).then(
+        finishRetirement,
+      );
     } else {
+      slot.active = false;
       drain();
     }
   };
@@ -566,6 +581,12 @@ function isFatalWorkerError(error: unknown): error is AudioTranscoderError {
   return (
     error instanceof AudioTranscoderError &&
     (error.code === 'WORKER_FAILURE' || error.code === 'WORKER_TERMINATED')
+  );
+}
+
+function isOperationAbortedError(error: unknown): error is AudioTranscoderError {
+  return (
+    error instanceof AudioTranscoderError && error.code === 'OPERATION_ABORTED'
   );
 }
 

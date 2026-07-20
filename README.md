@@ -173,6 +173,11 @@ runtime decoders validate at most the first decoded sample within the configured
 unsupported verdict. Increase the budget within its documented limit or ask the
 user to choose a different file instead of disabling the format globally.
 
+The engine adds no wall-clock deadline. Browser codec APIs are runtime-owned and
+can stall, so UI probes should compose their lifecycle `AbortSignal` with an
+application deadline. Treat a rejected or aborted probe as retryable rather
+than permanently disabling the input format.
+
 ### Output capabilities and runtime probing
 
 `getCapabilities().outputFormats` is the immutable candidate manifest bundled
@@ -274,6 +279,12 @@ Worker slot is available. Direct `pool.transcode()` calls accept an already-open
 output and abort it if admission, queued cancellation, disposal, or Worker
 startup fails. Pass the same `AbortSignal` to `schedule()`, probing, and
 transcoding.
+
+When running work rejects with `OPERATION_ABORTED`, the pool terminates that
+Worker before reusing the slot, so a stalled native decoder cannot accumulate
+across retries. Inside `schedule()`, discard owned output and rethrow the abort.
+If using a standalone Worker engine instead of the pool, await `dispose()`
+before creating a replacement and retrying.
 
 `inputReadBytes`, `pcmChunkBytes`, and `outputChunkBytes` bound one source read,
 decoded PCM yield, and encoded output chunk. They are not total heap limits.

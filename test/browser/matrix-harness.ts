@@ -1,6 +1,7 @@
 import {
   AUDIO_TRANSCODER_STREAM_CAPABILITIES,
   createAudioTranscoderOutputSession,
+  createAudioTranscoderStreamWorkerPool,
   createAudioTranscoderStreamWorkerEngine,
   type AudioStreamInput,
   type AudioStreamOutput,
@@ -15,6 +16,7 @@ const INPUT_FIXTURE_FRAMES = 44_100;
 const SAMPLE_RATE = 44_100;
 const CHANNELS = 2;
 const CHUNK_BYTES = 64 * 1024;
+const INPUT_PROBE_DEADLINE_MS = 15_000;
 const MP3_ACCEPTED_MATRIX = [
   [
     'mp3-128kbps',
@@ -99,16 +101,22 @@ interface BrowserWavMatrixResult {
 }
 
 interface BrowserFlacProbeBudgetResult {
-  readonly adequateStatus: string;
+  readonly adequateErrorCode: string | null;
+  readonly adequateStatus: string | null;
   readonly fixtureBytes: number;
   readonly lowBudgetBytes: number;
   readonly lowBudgetErrorCode: string | null;
   readonly lowBudgetStatus: string | null;
+  readonly probeDeadlineFired: boolean;
   readonly transcodeBytesWritten: number;
   readonly transcodeClosed: boolean;
   readonly transcodeErrorCode: string | null;
   readonly transcodeFormat: OutputFormat | null;
+  readonly transcodeAttempted: boolean;
   readonly transcodeWrites: number;
+  readonly workersAfterDeadline: number | null;
+  readonly recoveryStatus: string | null;
+  readonly recoveryWorkers: number | null;
 }
 
 interface BrowserOutputSupportProbeResult {
@@ -323,8 +331,11 @@ window.runWavConstraintMatrix = async () => {
 };
 
 window.runFlacProbeBudgetRegression = async () => {
-  const lowBudgetEngine = createAudioTranscoderStreamWorkerEngine();
-  const adequateEngine = createAudioTranscoderStreamWorkerEngine();
+  const pool = createAudioTranscoderStreamWorkerPool({
+    concurrency: 1,
+    idleTimeoutMs: null,
+    maxQueued: 1,
+  });
   try {
     const fixture = createConventionalFlacProbeFixture();
     const input = { blob: fixture, name: 'probe-budget.flac' };
@@ -333,44 +344,83 @@ window.runFlacProbeBudgetRegression = async () => {
     let lowBudgetErrorCode: string | null = null;
     let lowBudgetStatus: string | null = null;
     try {
-      const lowBudget = await lowBudgetEngine.probeInputSupport(input, {
+      const lowBudget = await pool.probeInputSupport(input, {
         inputReadBytes: lowBudgetBytes,
       });
       lowBudgetStatus = lowBudget.status;
     } catch (error) {
       lowBudgetErrorCode = errorCode(error);
     }
-    const adequate = await adequateEngine.probeInputSupport(input);
+    const probeController = new AbortController();
+    let probeDeadlineFired = false;
+    const probeDeadline = setTimeout(() => {
+      probeDeadlineFired = true;
+      probeController.abort('input probe deadline');
+    }, INPUT_PROBE_DEADLINE_MS);
+    let adequateErrorCode: string | null = null;
+    let adequateStatus: string | null = null;
+    try {
+      const adequate = await pool.probeInputSupport(input, {
+        signal: probeController.signal,
+      });
+      adequateStatus = adequate.status;
+    } catch (error) {
+      adequateErrorCode = errorCode(error);
+    } finally {
+      clearTimeout(probeDeadline);
+    }
     const sink = new SeekableMemorySink();
     let transcodeBytesWritten = 0;
     let transcodeErrorCode: string | null = null;
     let transcodeFormat: OutputFormat | null = null;
-    try {
-      const result = await adequateEngine.transcode(
-        input,
-        { channels: 1, dither: 'none', presetId: 'wav-pcm16', sampleRate: SAMPLE_RATE },
-        sink.stream,
-      );
-      await sink.waitForClose();
-      transcodeBytesWritten = result.bytesWritten;
-      transcodeFormat = result.format;
-    } catch (error) {
-      transcodeErrorCode = errorCode(error);
+    let workersAfterDeadline: number | null = null;
+    let recoveryStatus: string | null = null;
+    let recoveryWorkers: number | null = null;
+    const transcodeAttempted = adequateErrorCode === null;
+    if (transcodeAttempted) {
+      try {
+        const result = await pool.transcode(
+          input,
+          {
+            channels: 1,
+            dither: 'none',
+            presetId: 'wav-pcm16',
+            sampleRate: SAMPLE_RATE,
+          },
+          sink.stream,
+        );
+        await sink.waitForClose();
+        transcodeBytesWritten = result.bytesWritten;
+        transcodeFormat = result.format;
+      } catch (error) {
+        transcodeErrorCode = errorCode(error);
+      }
+    } else if (adequateErrorCode === 'OPERATION_ABORTED') {
+      workersAfterDeadline = pool.getQueueSnapshot().workers;
+      const recovery = await pool.probeInputSupport(cafInput(1_024));
+      recoveryStatus = recovery.status;
+      recoveryWorkers = pool.getQueueSnapshot().workers;
     }
     return {
-      adequateStatus: adequate.status,
+      adequateErrorCode,
+      adequateStatus,
       fixtureBytes: fixture.size,
       lowBudgetBytes,
       lowBudgetErrorCode,
       lowBudgetStatus,
+      probeDeadlineFired,
       transcodeBytesWritten,
       transcodeClosed: sink.closed,
       transcodeErrorCode,
       transcodeFormat,
+      transcodeAttempted,
       transcodeWrites: sink.writes,
+      workersAfterDeadline,
+      recoveryStatus,
+      recoveryWorkers,
     };
   } finally {
-    await Promise.all([lowBudgetEngine.dispose(), adequateEngine.dispose()]);
+    await pool.dispose();
   }
 };
 

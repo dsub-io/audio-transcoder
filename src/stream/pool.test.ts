@@ -698,7 +698,7 @@ describe('audio transcoder stream Worker pool', () => {
     await harness.pool.dispose();
   });
 
-  it('does not open the next destination until canceled Worker cleanup ends', async () => {
+  it('retires a canceled Worker before opening the next destination', async () => {
     const harness = createPoolHarness({ idleTimeoutMs: null });
     const controller = new AbortController();
     const active = harness.pool.inspect(INPUT, { signal: controller.signal });
@@ -723,17 +723,94 @@ describe('audio transcoder stream Worker pool', () => {
       message: 'stop active',
     });
     await flushMicrotasks();
+    expect(harness.created[0]?.worker.terminateCalls).toBe(1);
     expect(openDestination).toHaveBeenCalledOnce();
-    expect(harness.created[0]?.worker.posts[2]?.message.type).toBe('inspect');
+    expect(harness.created).toHaveLength(2);
+    expect(harness.created[1]?.worker.posts[0]?.message.type).toBe('inspect');
 
-    harness.created[0]!.worker.emit({
-      id: 2,
+    harness.created[1]!.worker.emit({
+      id: 1,
       operation: 'inspect',
       type: 'result',
       value: INSPECTION,
     });
     await next;
     harness.pool.terminate();
+  });
+
+  it('keeps repeated running cancellations at one retired Worker per attempt', async () => {
+    const harness = createPoolHarness({ idleTimeoutMs: null });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const controller = new AbortController();
+      const canceled = harness.pool.inspect(INPUT, {
+        signal: controller.signal,
+      });
+      const created = harness.created[attempt]!;
+
+      controller.abort(`stop attempt ${attempt}`);
+      created.worker.emit({
+        error: { message: 'worker canceled', name: 'Error' },
+        id: 1,
+        type: 'error',
+      });
+
+      await expect(canceled).rejects.toMatchObject({
+        code: 'OPERATION_ABORTED',
+        message: `stop attempt ${attempt}`,
+      });
+      await flushMicrotasks();
+      expect(created.worker.terminateCalls).toBe(1);
+      expect(harness.pool.getQueueSnapshot()).toMatchObject({
+        active: 0,
+        queued: 0,
+        workers: 0,
+      });
+    }
+
+    const recovered = harness.pool.inspect(INPUT);
+    expect(harness.created).toHaveLength(4);
+    harness.created[3]!.worker.emit({
+      id: 1,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
+    });
+    await expect(recovered).resolves.toEqual(INSPECTION);
+    await harness.pool.dispose();
+  });
+
+  it('does not drain a retiring slot after pool termination', async () => {
+    const harness = createPoolHarness({ idleTimeoutMs: null });
+    const replacementWork = vi.fn(async () => 1);
+    const canceled = harness.pool
+      .schedule(async () => {
+        throw new AudioTranscoderError(
+          'OPERATION_ABORTED',
+          'scheduled cancellation',
+        );
+      })
+      .catch((error: unknown) => {
+        harness.pool.terminate();
+        throw error;
+      });
+    const queued = harness.pool.schedule(replacementWork);
+
+    await expect(canceled).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+    });
+    await expect(queued).rejects.toMatchObject({
+      code: 'WORKER_TERMINATED',
+    });
+    await harness.pool.dispose();
+    expect(replacementWork).not.toHaveBeenCalled();
+    expect(harness.created).toHaveLength(1);
+    expect(harness.pool.getQueueSnapshot()).toMatchObject({
+      active: 0,
+      queued: 0,
+      terminated: true,
+      workers: 0,
+    });
   });
 
   it('rejects pre-aborted work before allocating a Worker', async () => {

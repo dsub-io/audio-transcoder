@@ -262,36 +262,66 @@ test('encodes WAV preset, rate, and channel boundaries and rejects outside them 
   );
 });
 
-test('enforces the cumulative FLAC probe budget without blocking adequate probe and transcode', async ({
-  browserName,
+test('enforces the FLAC probe budget and gates transcode on a responsive probe', async ({
   page,
 }) => {
   await page.goto('/test/browser/');
   const result = await page.evaluate(() => window.runFlacProbeBudgetRegression());
 
   expect(result.fixtureBytes).toBeGreaterThan(result.lowBudgetBytes);
-  if (browserName === 'webkit') {
+  if (result.adequateErrorCode === 'OPERATION_ABORTED') {
     expect(result).toEqual(
       expect.objectContaining({
+        adequateErrorCode: 'OPERATION_ABORTED',
+        adequateStatus: null,
+        lowBudgetErrorCode: 'RESOURCE_LIMIT_EXCEEDED',
+        lowBudgetStatus: null,
+        probeDeadlineFired: true,
+        transcodeAttempted: false,
+        transcodeBytesWritten: 0,
+        transcodeClosed: false,
+        transcodeErrorCode: null,
+        transcodeFormat: null,
+        transcodeWrites: 0,
+        workersAfterDeadline: 0,
+        recoveryStatus: 'supported',
+        recoveryWorkers: 1,
+      }),
+    );
+  } else if (result.adequateStatus === 'recognized-unsupported') {
+    expect(result).toEqual(
+      expect.objectContaining({
+        adequateErrorCode: null,
         adequateStatus: 'recognized-unsupported',
         lowBudgetErrorCode: 'RESOURCE_LIMIT_EXCEEDED',
         lowBudgetStatus: null,
+        probeDeadlineFired: false,
         transcodeBytesWritten: 0,
         transcodeClosed: false,
         transcodeErrorCode: 'UNSUPPORTED_INPUT',
         transcodeFormat: null,
+        transcodeAttempted: true,
         transcodeWrites: 0,
+        workersAfterDeadline: null,
+        recoveryStatus: null,
+        recoveryWorkers: null,
       }),
     );
   } else {
     expect(result).toEqual(
       expect.objectContaining({
+        adequateErrorCode: null,
         adequateStatus: 'supported',
         lowBudgetErrorCode: 'RESOURCE_LIMIT_EXCEEDED',
         lowBudgetStatus: null,
+        probeDeadlineFired: false,
         transcodeClosed: true,
         transcodeErrorCode: null,
         transcodeFormat: 'wav',
+        transcodeAttempted: true,
+        workersAfterDeadline: null,
+        recoveryStatus: null,
+        recoveryWorkers: null,
       }),
     );
     expect(result.transcodeBytesWritten).toBeGreaterThan(44);

@@ -188,6 +188,18 @@ describe('MediaBunny streaming source adapter', () => {
     expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
   });
 
+  it('confirms support when the decoder iterator has no return method', async () => {
+    mocks.getCodec.mockResolvedValue('flac');
+    const sample = new SampleStub([0.25, -0.25]);
+    mocks.samples.mockReturnValue(samplesWithoutReturn(sample));
+
+    await expect(
+      probeMediaBlobSupport(STREAM_INPUT, 65_536),
+    ).resolves.toMatchObject({ decodeSupport: 'likely-browser' });
+    expect(sample.close).toHaveBeenCalledOnce();
+    expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
+  });
+
   it('reports a first-sample decoder failure as recognized unsupported', async () => {
     mocks.getCodec.mockResolvedValue('flac');
     const failure = new DOMException(
@@ -295,13 +307,33 @@ describe('MediaBunny streaming source adapter', () => {
     await vi.waitFor(() => expect(stream.next).toHaveBeenCalledOnce());
 
     controller.abort('stop validation');
-    stream.reject(new Error('input disposed'));
 
     await expect(probing).rejects.toMatchObject({
       code: 'OPERATION_ABORTED',
       message: 'stop validation',
     });
     expect(stream.return).toHaveBeenCalledOnce();
+    expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('maps abort while the browser decoder availability check is stalled', async () => {
+    mocks.getCodec.mockResolvedValue('flac');
+    mocks.canDecode.mockReturnValue(new Promise<boolean>(() => undefined));
+    const controller = new AbortController();
+    const probing = probeMediaBlobSupport(
+      STREAM_INPUT,
+      65_536,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(mocks.canDecode).toHaveBeenCalledOnce());
+
+    controller.abort('decoder probe deadline');
+
+    await expect(probing).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'decoder probe deadline',
+    });
+    expect(mocks.sampleSinks).toHaveLength(0);
     expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
   });
 
@@ -368,13 +400,59 @@ describe('MediaBunny streaming source adapter', () => {
       message: 'during probe',
     });
     expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
+
+    const beforeMetadata = new AbortController();
+    mocks.canRead.mockImplementationOnce(() => {
+      beforeMetadata.abort('before metadata');
+      return Promise.reject(new Error('late container-recognition failure'));
+    });
+    await expect(
+      inspectMediaBlob(STREAM_INPUT, 65_536, beforeMetadata.signal),
+    ).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'before metadata',
+    });
+    expect(mocks.inputs[1]?.dispose).toHaveBeenCalledOnce();
   });
+
+  it.each(['container recognition', 'audio-track lookup'] as const)(
+    'maps abort while %s is stalled',
+    async (stage) => {
+      if (stage === 'container recognition') {
+        mocks.canRead.mockReturnValue(new Promise<boolean>(() => undefined));
+      } else {
+        mocks.getTrack.mockReturnValue(new Promise<never>(() => undefined));
+      }
+      const controller = new AbortController();
+      const inspection = inspectMediaBlob(
+        STREAM_INPUT,
+        65_536,
+        controller.signal,
+      );
+      await vi.waitFor(() =>
+        expect(
+          stage === 'container recognition' ? mocks.canRead : mocks.getTrack,
+        ).toHaveBeenCalledOnce(),
+      );
+
+      controller.abort(`stop ${stage}`);
+
+      await expect(inspection).rejects.toMatchObject({
+        code: 'OPERATION_ABORTED',
+        message: `stop ${stage}`,
+      });
+      expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
+    },
+  );
 
   it('rethrows ordinary probe failures after disposal', async () => {
     const failure = new TypeError('metadata failed');
     mocks.getCodec.mockRejectedValue(failure);
+    const controller = new AbortController();
 
-    await expect(inspectMediaBlob(STREAM_INPUT, 65_536)).rejects.toBe(failure);
+    await expect(
+      inspectMediaBlob(STREAM_INPUT, 65_536, controller.signal),
+    ).rejects.toBe(failure);
     expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
   });
 
@@ -406,6 +484,18 @@ describe('MediaBunny streaming source adapter', () => {
     source!.close();
     source!.close();
     expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
+  });
+
+  it('streams from a decoder iterator without a return method', async () => {
+    const sample = new SampleStub([0.25, -0.25]);
+    mocks.samples.mockReturnValue(samplesWithoutReturn(sample));
+    const source = await openMediaBlobSource(STREAM_INPUT, 65_536, 65_536);
+
+    await expect(collect(source!.chunks())).resolves.toEqual([
+      new Float32Array([0.25, -0.25]),
+    ]);
+    expect(sample.close).toHaveBeenCalledOnce();
+    source!.close();
   });
 
   it.each([0, 1.5] as const)(
@@ -592,19 +682,16 @@ describe('MediaBunny streaming source adapter', () => {
     source!.close();
   });
 
-  it('disposes the decoder on abort and maps its iterator failure', async () => {
-    let release!: () => void;
-    const waiting = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    mocks.samples.mockReturnValue(waitingSamples(waiting));
+  it('settles a stalled decoder iterator on abort', async () => {
+    mocks.samples.mockReturnValue(
+      waitingSamples(new Promise<void>(() => undefined)),
+    );
     const source = await openMediaBlobSource(STREAM_INPUT, 65_536, 65_536);
     const controller = new AbortController();
     const chunks = collect(source!.chunks(controller.signal));
     await Promise.resolve();
 
     controller.abort('stop decode');
-    release();
     await expect(chunks).rejects.toMatchObject({
       code: 'OPERATION_ABORTED',
       message: 'stop decode',
@@ -664,6 +751,22 @@ async function* samplesOf(...samples: SampleStub[]) {
   for (const sample of samples) {
     yield sample;
   }
+}
+
+function samplesWithoutReturn(sample: SampleStub) {
+  let consumed = false;
+  return {
+    async next(): Promise<IteratorResult<SampleStub, void>> {
+      if (consumed) {
+        return { done: true, value: undefined };
+      }
+      consumed = true;
+      return { done: false, value: sample };
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
 }
 
 async function* throwingSamples(error: Error) {
@@ -734,12 +837,9 @@ function failingSamples(error: Error) {
 }
 
 function deferredSamples() {
-  let rejectNext!: (error: Error) => void;
   const next = vi.fn(
     () =>
-      new Promise<IteratorResult<SampleStub, void>>((_resolve, reject) => {
-        rejectNext = reject;
-      }),
+      new Promise<IteratorResult<SampleStub, void>>(() => undefined),
   );
   const returnIterator = vi.fn(
     async (): Promise<IteratorResult<SampleStub, void>> => ({
@@ -757,7 +857,6 @@ function deferredSamples() {
   return {
     iterator,
     next,
-    reject: (error: Error) => rejectNext(error),
     return: returnIterator,
   };
 }

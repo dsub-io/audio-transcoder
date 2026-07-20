@@ -134,11 +134,11 @@ async function probeMediaBlob(
   };
 
   try {
-    if (!(await input.canRead())) {
+    if (!(await raceWithAbort(input.canRead(), signal))) {
       dispose();
       return null;
     }
-    const track = await input.getPrimaryAudioTrack();
+    const track = await raceWithAbort(input.getPrimaryAudioTrack(), signal);
     if (track === null) {
       throw new AudioTranscoderError(
         'UNSUPPORTED_INPUT',
@@ -146,14 +146,17 @@ async function probeMediaBlob(
       );
     }
     const [format, codec, channels, sampleRate, rawDurationSeconds, canDecode] =
-      await Promise.all([
-        input.getFormat(),
-        track.getCodec(),
-        track.getNumberOfChannels(),
-        track.getSampleRate(),
-        track.getDurationFromMetadata(),
-        track.canDecode(),
-      ]);
+      await raceWithAbort(
+        Promise.all([
+          input.getFormat(),
+          track.getCodec(),
+          track.getNumberOfChannels(),
+          track.getSampleRate(),
+          track.getDurationFromMetadata(),
+          track.canDecode(),
+        ]),
+        signal,
+      );
     throwIfAborted(signal);
     assertAudioParameters(channels, sampleRate);
     const durationSeconds =
@@ -206,7 +209,7 @@ async function validateFirstDecodedSample(
     iterator = new AudioSampleSink(probe.track)
       .samples()
       [Symbol.asyncIterator]();
-    const result = await iterator.next();
+    const result = await raceWithAbort(iterator.next(), signal);
     throwIfAborted(signal);
     if (result.done) {
       validation = 'empty';
@@ -224,7 +227,10 @@ async function validateFirstDecodedSample(
       failures.push(error);
     }
     try {
-      await iterator?.return?.();
+      const cleanup = iterator?.return?.();
+      if (cleanup !== undefined) {
+        await raceWithAbort(cleanup, signal);
+      }
     } catch (error) {
       failures.push(error);
     }
@@ -270,11 +276,19 @@ async function* decodeChunks(
   signal?: AbortSignal,
 ): AsyncGenerator<Float32Array, void, unknown> {
   const abort = (): void => closeInput();
+  let iterator: AsyncIterator<AudioSample> | undefined;
   let decodedSamples = 0;
   signal?.addEventListener('abort', abort, { once: true });
   try {
-    const sink = new AudioSampleSink(track);
-    for await (const sample of sink.samples()) {
+    iterator = new AudioSampleSink(track)
+      .samples()
+      [Symbol.asyncIterator]();
+    while (true) {
+      const result = await raceWithAbort(iterator.next(), signal);
+      if (result.done) {
+        break;
+      }
+      const sample = result.value;
       decodedSamples += 1;
       try {
         throwIfAborted(signal);
@@ -333,7 +347,14 @@ async function* decodeChunks(
     }
     throw error;
   } finally {
-    signal?.removeEventListener('abort', abort);
+    try {
+      const cleanup = iterator?.return?.();
+      if (cleanup !== undefined) {
+        await raceWithAbort(cleanup, signal);
+      }
+    } finally {
+      signal?.removeEventListener('abort', abort);
+    }
   }
 }
 
@@ -406,4 +427,41 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
     throw createOperationAbortedError(signal);
   }
+}
+
+function raceWithAbort<T>(
+  operation: Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (signal === undefined) {
+    return operation;
+  }
+  if (signal.aborted) {
+    void operation.catch(() => undefined);
+    return Promise.reject(createOperationAbortedError(signal));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let activeSignal: AbortSignal | undefined = signal;
+    const cleanup = (): void => {
+      activeSignal?.removeEventListener('abort', abort);
+      activeSignal = undefined;
+    };
+    const abort = (): void => {
+      const abortedSignal = activeSignal!;
+      cleanup();
+      reject(createOperationAbortedError(abortedSignal));
+    };
+    activeSignal.addEventListener('abort', abort, { once: true });
+    void operation.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
