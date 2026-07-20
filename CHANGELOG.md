@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.3](https://github.com/dsub-io/audio-transcoder/compare/v0.0.2...v0.0.3) (2026-07-20)
+
+
+### Features
+
+* add bounded browser streaming runtime ([f6d84b2](https://github.com/dsub-io/audio-transcoder/commit/f6d84b2e1a5c4992f0fd63b8bfc9522aed7c1cc9))
+
+
+### Miscellaneous Chores
+
+* set release version ([0a8078a](https://github.com/dsub-io/audio-transcoder/commit/0a8078abfdb170ec2d5e8aa05e39e543b4d065d8))
+
 ## [0.0.2](https://github.com/dsub-io/audio-transcoder/compare/v0.0.1...v0.0.2) (2026-07-19)
 
 
