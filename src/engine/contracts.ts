@@ -6,12 +6,20 @@ export interface AudioTranscoderEngineInfo {
 }
 
 export interface AudioInput {
-  /** Complete file bytes. May be detached when `transferInput` is enabled. */
+  /**
+   * Complete file bytes. Treat them as immutable until the operation settles;
+   * a Worker may detach the buffer at dispatch when transfer is enabled.
+   */
   readonly data: ArrayBuffer;
   readonly name?: string;
   readonly size?: number;
 }
 
+/**
+ * Header-level decode confidence: `built-in` is package-owned;
+ * `likely-browser` is unverified browser-friendly input; `browser-dependent`
+ * varies by runtime; `unknown` has no recognized decoder path.
+ */
 export type AudioDecodeSupport =
   | 'browser-dependent'
   | 'built-in'
@@ -30,6 +38,9 @@ export interface AudioInspection {
 }
 
 export interface PcmAudio {
+  /**
+   * Treat channel views and their backing buffers as immutable until settlement.
+   */
   readonly channelData: readonly Float32Array[];
   readonly sampleRate: number;
 }
@@ -56,8 +67,11 @@ export interface EncodedAudio {
 }
 
 export interface AudioTranscoderCapabilities {
+  /** Installed decoder format labels; concrete data may still reject. */
   readonly decode: readonly string[];
+  /** Exact output presets accepted by `encode()` and `transcode()`. */
   readonly encode: readonly AudioOutputPreset[];
+  /** Installed header-inspector format labels, not decode guarantees. */
   readonly inspect: readonly string[];
 }
 
@@ -77,17 +91,28 @@ export interface AudioProgress {
 export type AudioProgressListener = (progress: AudioProgress) => void;
 
 export interface AudioOperationOptions {
-  /** Receives immutable progress snapshots. */
+  /**
+   * Receives immutable progress snapshots; a thrown listener error rejects work.
+   */
   readonly onProgress?: AudioProgressListener;
 
-  /** Cancels queued or running work. */
+  /** Cancels queued or running work with `OPERATION_ABORTED`. */
   readonly signal?: AbortSignal;
 
   /**
-   * Transfers input ownership to a Worker instead of copying it. The source
-   * ArrayBuffer is detached and must not be reused. Ignored by inline engines.
+   * Transfers input ownership at Worker dispatch instead of copying it.
+   * Decode/transcode detach `AudioInput.data`; encode detaches every transferable
+   * `ArrayBuffer` backing a channel view, including aliased views of the same
+   * buffer. Non-transferable backing storage is copied. Ignored by inline
+   * engines. Treat all inputs as immutable until the operation settles.
    */
   readonly transferInput?: boolean;
+
+  /**
+   * Disables the whole-buffer size guard, but cannot prevent an out-of-memory
+   * failure. Prefer the streaming Worker APIs for large files.
+   */
+  readonly unsafeAllowLargeBuffers?: boolean;
 }
 
 export interface CreateAudioTranscoderEngineOptions {
@@ -96,12 +121,22 @@ export interface CreateAudioTranscoderEngineOptions {
 }
 
 export interface AudioTranscoderEngine {
-  /** Decodes supported input into planar Float32 PCM. */
+  /**
+   * Decodes supported input into planar Float32 PCM.
+   *
+   * @throws `UNSUPPORTED_INPUT`, validation, resource-limit, or cancellation
+   * errors.
+   */
   decode(
     input: AudioInput,
     options?: AudioOperationOptions,
   ): Promise<DecodedAudio>;
-  /** Encodes planar PCM with a registered output preset. */
+  /**
+   * Encodes planar PCM with a registered output preset.
+   *
+   * @throws `UNSUPPORTED_OUTPUT`, validation, resource-limit, or cancellation
+   * errors.
+   */
   encode(
     audio: PcmAudio,
     presetId: string,
@@ -113,7 +148,11 @@ export interface AudioTranscoderEngine {
   /** Inspects headers synchronously without decoding audio payloads. */
   inspect(input: AudioInput): AudioInspection;
 
-  /** Decodes then encodes while preserving sample rate and channel layout. */
+  /**
+   * Decodes then encodes while preserving sample rate and channel layout.
+   *
+   * @throws The documented decode or encode errors for either phase.
+   */
   transcode(
     input: AudioInput,
     presetId: string,
@@ -127,6 +166,20 @@ export interface AudioTranscoderWorkerEngine extends AudioTranscoderEngine {
 }
 
 export interface CreateAudioTranscoderWorkerEngineOptions {
+  /**
+   * Maximum operations waiting behind the active operation. Defaults to 8.
+   * Must be an integer from 0 to 64. The active operation is excluded; use 0
+   * to reject while the Worker is busy.
+   */
+  readonly maxQueued?: number;
+
+  /**
+   * Maximum bytes retained by operations waiting behind the active operation.
+   * Defaults to the 64 MiB whole-buffer safety limit. The active operation is
+   * excluded. `unsafeAllowLargeBuffers` does not bypass this aggregate limit.
+   */
+  readonly maxQueuedBytes?: number;
+
   /**
    * Supplies a module Worker when a custom entry URL or CSP handling is
    * required. Import `@dsub/audio-transcoder/worker` from that entry module.

@@ -14,6 +14,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  NPM_VERSION: '>=11.5.1 <12'
+  PNPM_VERSION: 11.9.0
+
 jobs:
   release-please:
     runs-on:
@@ -67,6 +71,23 @@ jobs:
           node-version: '24'
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+
+      - name: Set up npm for trusted publishing
+        run: |
+          npm install --global "npm@${NPM_VERSION}" --no-audit --no-fund
+          node_version="$(node --version)"
+          npm_version="$(npm --version)"
+          printf 'Node.js %s\nnpm %s\n' "${node_version}" "${npm_version}"
+          node - "${npm_version}" <<'NODE'
+          const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/.exec(process.argv[2]);
+          if (match === null) {
+            throw new Error(`Unexpected npm version: ${process.argv[2]}`);
+          }
+          const [, major, minor, patch] = match.map(Number);
+          if (major !== 11 || minor < 5 || (minor === 5 && patch < 1)) {
+            throw new Error(`Trusted publishing requires npm 11.5.1 or newer within npm 11; received ${process.argv[2]}`);
+          }
+          NODE
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile

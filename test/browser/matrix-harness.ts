@@ -1,0 +1,1673 @@
+import {
+  AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+  createAudioTranscoderOutputSession,
+  createAudioTranscoderStreamWorkerEngine,
+  type AudioStreamInput,
+  type AudioStreamOutput,
+  type AudioStreamOutputChunk,
+  type AudioStreamOutputPresetId,
+  type AudioStreamTarget,
+  type AudioTranscoderStreamWorkerEngine,
+} from '@dsub/audio-transcoder';
+
+const MATRIX_FRAMES = 8_192;
+const INPUT_FIXTURE_FRAMES = 44_100;
+const SAMPLE_RATE = 44_100;
+const CHANNELS = 2;
+const CHUNK_BYTES = 64 * 1024;
+const MP3_ACCEPTED_MATRIX = [
+  [
+    'mp3-128kbps',
+    [16_000, 22_050, 24_000, 32_000, 44_100, 48_000],
+  ],
+  ['mp3-192kbps', [32_000, 44_100, 48_000]],
+  ['mp3-256kbps', [32_000, 44_100, 48_000]],
+  ['mp3-320kbps', [32_000, 44_100, 48_000]],
+] as const;
+const MP3_REJECTED_SAMPLE_RATES = [
+  8_000,
+  11_025,
+  12_000,
+  16_000,
+  22_050,
+  24_000,
+] as const;
+const MP3_HIGH_BITRATE_PRESETS = [
+  'mp3-192kbps',
+  'mp3-256kbps',
+  'mp3-320kbps',
+] as const;
+const MP3_128KBPS_REJECTED_SAMPLE_RATES = [8_000, 11_025, 12_000] as const;
+
+type OutputFormat = 'flac' | 'mp3' | 'wav';
+
+interface BrowserMatrixResult {
+  readonly bitDepth: number | null;
+  readonly bitrate: number | null;
+  readonly bytesWritten: number;
+  readonly channels: number;
+  readonly closedBeforeResolved: boolean;
+  readonly finalSize: number;
+  readonly flacAudioFrame: boolean | null;
+  readonly flacTotalSamples: number | null;
+  readonly expectedTotalSamples: number;
+  readonly format: OutputFormat;
+  readonly formatTag: number | null;
+  readonly maxChunkBytes: number;
+  readonly mp3Frames: number | null;
+  readonly mp3FrameBitrates: readonly number[] | null;
+  readonly mp3SeekHeader: 'Info' | 'Xing' | null;
+  readonly mp3SeekHeaderFrames: number | null;
+  readonly presetId: AudioStreamOutputPresetId;
+  readonly progress: readonly number[];
+  readonly resultDetailsFormat: OutputFormat;
+  readonly resultFormat: OutputFormat;
+  readonly resultPresetId: string;
+  readonly resultRf64: boolean | null;
+  readonly sampleRate: number;
+  readonly wavBlockAlign: number | null;
+  readonly wavByteRate: number | null;
+  readonly wavDataBytes: number | null;
+  readonly wavDataEndsAtFileEnd: boolean | null;
+  readonly wavDataChunks: number | null;
+  readonly wavFmtBytes: number | null;
+  readonly wavFmtChunks: number | null;
+  readonly wavFrames: number | null;
+  readonly wavRiffBytes: number | null;
+  readonly writes: number;
+  readonly workerResources: readonly string[];
+}
+
+interface BrowserConstraintRejection {
+  readonly channels: number;
+  readonly errorCode: string;
+  readonly presetId: AudioStreamOutputPresetId;
+  readonly sampleRate: number;
+  readonly writes: number;
+}
+
+interface BrowserFlacMatrixResult {
+  readonly accepted: readonly BrowserMatrixResult[];
+  readonly advertisedSampleRates: readonly number[];
+  readonly invalid: readonly BrowserConstraintRejection[];
+  readonly resourcesBeforeAcceptedEncoding: readonly string[];
+}
+
+interface BrowserWavMatrixResult {
+  readonly accepted: readonly BrowserMatrixResult[];
+  readonly invalid: readonly BrowserConstraintRejection[];
+}
+
+interface BrowserFlacProbeBudgetResult {
+  readonly adequateStatus: string;
+  readonly fixtureBytes: number;
+  readonly lowBudgetBytes: number;
+  readonly lowBudgetErrorCode: string | null;
+  readonly lowBudgetStatus: string | null;
+  readonly transcodeBytesWritten: number;
+  readonly transcodeClosed: boolean;
+  readonly transcodeErrorCode: string | null;
+  readonly transcodeFormat: OutputFormat | null;
+  readonly transcodeWrites: number;
+}
+
+interface BrowserOutputSupportProbeResult {
+  readonly disposed: boolean;
+  readonly flac: { readonly code: string; readonly status: string };
+  readonly invalidMp3: { readonly code: string; readonly status: string };
+  readonly mp3: { readonly code: string; readonly status: string };
+  readonly outputArtifactsCreated: number;
+  readonly resourcesAfterFlac: readonly string[];
+  readonly resourcesAfterInvalidMp3: readonly string[];
+  readonly resourcesAfterMp3: readonly string[];
+  readonly resourcesAfterWav: readonly string[];
+  readonly wav: { readonly code: string; readonly status: string };
+}
+
+interface BrowserStressResult {
+  readonly bytesWritten: number;
+  readonly closed: boolean;
+  readonly maxChunkBytes: number;
+  readonly progressEvents: number;
+  readonly writes: number;
+}
+
+interface BrowserMp3ConstraintMatrixResult {
+  readonly accepted: readonly BrowserMatrixResult[];
+  readonly invalid: readonly {
+    readonly errorCode: string;
+    readonly presetId: AudioStreamOutputPresetId;
+    readonly sampleRate: number;
+  }[];
+  readonly resourcesBeforeAcceptedEncoding: readonly string[];
+}
+
+interface InputCapabilitySummary {
+  readonly extensionHints: readonly string[];
+  readonly id: string;
+  readonly path: 'built-in-pcm' | 'runtime-probed';
+}
+
+interface InputProbeFixtureResult {
+  readonly capabilityId: string | null;
+  readonly capabilityPath: 'built-in-pcm' | 'runtime-probed' | null;
+  readonly container: string | null;
+  readonly decodeSupport: string | null;
+  readonly errorCode: string | null;
+  readonly errorMessage: string | null;
+  readonly errorName: string | null;
+  readonly fixture: 'aiff' | 'caf' | 'flac' | 'mp3' | 'unknown' | 'wav';
+  readonly probeStatus:
+    | 'recognized-unsupported'
+    | 'supported'
+    | 'unsupported';
+  readonly transcodeSucceeded: boolean;
+}
+
+interface InputProbeMatrixResult {
+  readonly advertised: readonly InputCapabilitySummary[];
+  readonly fixtures: readonly InputProbeFixtureResult[];
+}
+
+interface OutputSessionSmokeResult {
+  readonly artifactSize: number;
+  readonly artifactStorage: 'memory' | 'opfs';
+  readonly bitDepth: number;
+  readonly bytesWritten: number;
+  readonly channels: number;
+  readonly createAfterDisposeCode: string;
+  readonly mimeType: string;
+  readonly name: string;
+  readonly namespaceEntriesAfterDispose: number | null;
+  readonly pendingStorage: 'memory' | 'opfs';
+  readonly sampleRate: number;
+  readonly storage: 'memory' | 'opfs';
+}
+
+interface OpfsAbortSmokeResult {
+  readonly code: string;
+  readonly originalPreserved: boolean;
+  readonly size: number;
+}
+
+declare global {
+  interface Window {
+    runAudioStreamMatrix(): Promise<readonly BrowserMatrixResult[]>;
+    runBoundedStreamStress(): Promise<BrowserStressResult>;
+    runFlacConstraintMatrix(): Promise<BrowserFlacMatrixResult>;
+    runFlacProbeBudgetRegression(): Promise<BrowserFlacProbeBudgetResult>;
+    runInputProbeMatrix(): Promise<InputProbeMatrixResult>;
+    runMp3ConstraintMatrix(): Promise<BrowserMp3ConstraintMatrixResult>;
+    runOpfsAbortSmoke(): Promise<OpfsAbortSmokeResult>;
+    runOutputSupportProbe(): Promise<BrowserOutputSupportProbeResult>;
+    runOutputSessionSmoke(): Promise<OutputSessionSmokeResult>;
+    runWavConstraintMatrix(): Promise<BrowserWavMatrixResult>;
+    runSingleOutputPreset(
+      presetId: AudioStreamOutputPresetId,
+    ): Promise<BrowserMatrixResult>;
+  }
+}
+
+window.runAudioStreamMatrix = async () => {
+  const engine = createAudioTranscoderStreamWorkerEngine();
+  const results: BrowserMatrixResult[] = [];
+
+  try {
+    for (const preset of AUDIO_TRANSCODER_STREAM_CAPABILITIES.outputPresets) {
+      results.push(await transcodePreset(engine, preset.id));
+    }
+  } finally {
+    await engine.dispose();
+  }
+
+  return results;
+};
+
+window.runFlacConstraintMatrix = async () => {
+  let worker: Worker | undefined;
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    workerFactory: () => {
+      worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      return worker;
+    },
+  });
+  const format = AUDIO_TRANSCODER_STREAM_CAPABILITIES.outputFormats.find(
+    ({ id }) => id === 'flac',
+  );
+  if (format === undefined) {
+    throw new Error('Public capabilities do not advertise FLAC output.');
+  }
+  const constraint = format.presets[0]?.target.sampleRate;
+  if (constraint?.kind !== 'discrete') {
+    throw new Error('Public FLAC capabilities must advertise discrete sample rates.');
+  }
+  const advertisedSampleRates = [...constraint.values];
+  const invalidTargets = [
+    { channels: 1, sampleRate: 7_999 },
+    { channels: 1, sampleRate: 384_001 },
+    { channels: 1, sampleRate: 12_345 },
+    { channels: 0, sampleRate: advertisedSampleRates[0]! },
+    { channels: 9, sampleRate: advertisedSampleRates[0]! },
+  ] as const;
+
+  try {
+    const invalid: BrowserConstraintRejection[] = [];
+    for (const presetId of ['flac-16bit', 'flac-24bit'] as const) {
+      for (const target of invalidTargets) {
+        invalid.push(await rejectTarget(engine, presetId, target));
+      }
+    }
+    const resourcesBeforeAcceptedEncoding = await readWorkerResourceEntries(worker!);
+    const accepted: BrowserMatrixResult[] = [];
+    for (const presetId of ['flac-16bit', 'flac-24bit'] as const) {
+      for (const sampleRate of advertisedSampleRates) {
+        for (const channels of [1, 8] as const) {
+          accepted.push(
+            await transcodePreset(engine, presetId, sampleRate, channels, 1_024),
+          );
+        }
+      }
+    }
+    return {
+      accepted,
+      advertisedSampleRates,
+      invalid,
+      resourcesBeforeAcceptedEncoding,
+    };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runWavConstraintMatrix = async () => {
+  const engine = createAudioTranscoderStreamWorkerEngine();
+  try {
+    const invalid: BrowserConstraintRejection[] = [];
+    const invalidTargets = [
+      { channels: 1, sampleRate: 7_999 },
+      { channels: 1, sampleRate: 384_001 },
+      { channels: 0, sampleRate: 8_000 },
+      { channels: 33, sampleRate: 8_000 },
+    ] as const;
+    for (const presetId of [
+      'wav-pcm16',
+      'wav-pcm24',
+      'wav-pcm32',
+      'wav-float32',
+    ] as const) {
+      for (const target of invalidTargets) {
+        invalid.push(await rejectTarget(engine, presetId, target));
+      }
+    }
+    const accepted: BrowserMatrixResult[] = [];
+    for (const presetId of [
+      'wav-pcm16',
+      'wav-pcm24',
+      'wav-pcm32',
+      'wav-float32',
+    ] as const) {
+      for (const sampleRate of [8_000, 384_000] as const) {
+        for (const channels of [1, 32] as const) {
+          accepted.push(
+            await transcodePreset(engine, presetId, sampleRate, channels, 1_024),
+          );
+        }
+      }
+    }
+    return { accepted, invalid };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runFlacProbeBudgetRegression = async () => {
+  const lowBudgetEngine = createAudioTranscoderStreamWorkerEngine();
+  const adequateEngine = createAudioTranscoderStreamWorkerEngine();
+  try {
+    const fixture = createConventionalFlacProbeFixture();
+    const input = { blob: fixture, name: 'probe-budget.flac' };
+    const lowBudgetBytes =
+      AUDIO_TRANSCODER_STREAM_CAPABILITIES.limits.buffers.minimumBytes;
+    let lowBudgetErrorCode: string | null = null;
+    let lowBudgetStatus: string | null = null;
+    try {
+      const lowBudget = await lowBudgetEngine.probeInputSupport(input, {
+        inputReadBytes: lowBudgetBytes,
+      });
+      lowBudgetStatus = lowBudget.status;
+    } catch (error) {
+      lowBudgetErrorCode = errorCode(error);
+    }
+    const adequate = await adequateEngine.probeInputSupport(input);
+    const sink = new SeekableMemorySink();
+    let transcodeBytesWritten = 0;
+    let transcodeErrorCode: string | null = null;
+    let transcodeFormat: OutputFormat | null = null;
+    try {
+      const result = await adequateEngine.transcode(
+        input,
+        { channels: 1, dither: 'none', presetId: 'wav-pcm16', sampleRate: SAMPLE_RATE },
+        sink.stream,
+      );
+      await sink.waitForClose();
+      transcodeBytesWritten = result.bytesWritten;
+      transcodeFormat = result.format;
+    } catch (error) {
+      transcodeErrorCode = errorCode(error);
+    }
+    return {
+      adequateStatus: adequate.status,
+      fixtureBytes: fixture.size,
+      lowBudgetBytes,
+      lowBudgetErrorCode,
+      lowBudgetStatus,
+      transcodeBytesWritten,
+      transcodeClosed: sink.closed,
+      transcodeErrorCode,
+      transcodeFormat,
+      transcodeWrites: sink.writes,
+    };
+  } finally {
+    await Promise.all([lowBudgetEngine.dispose(), adequateEngine.dispose()]);
+  }
+};
+
+window.runOutputSupportProbe = async () => {
+  let worker: Worker | undefined;
+  let disposed = false;
+  let outputArtifactsCreated = 0;
+  let probeResult: Omit<BrowserOutputSupportProbeResult, 'disposed'> | undefined;
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    workerFactory: () => {
+      worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      return worker;
+    },
+  });
+
+  try {
+    const invalidMp3 = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'mp3-192kbps',
+      sampleRate: 24_000,
+    });
+    const resourcesAfterInvalidMp3 = await readWorkerResourceEntries(worker!);
+    const wav = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'wav-pcm16',
+      sampleRate: SAMPLE_RATE,
+    });
+    const resourcesAfterWav = await readWorkerResourceEntries(worker!);
+    const mp3 = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'mp3-128kbps',
+      sampleRate: SAMPLE_RATE,
+    });
+    const resourcesAfterMp3 = await readWorkerResourceEntries(worker!);
+    const flac = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'flac-16bit',
+      sampleRate: SAMPLE_RATE,
+    });
+    const resourcesAfterFlac = await readWorkerResourceEntries(worker!);
+
+    // These public probes accept only exact targets; this harness has no output
+    // sink, session, or artifact creation site that could increment the counter.
+    probeResult = {
+      flac: { code: flac.code, status: flac.status },
+      invalidMp3: { code: invalidMp3.code, status: invalidMp3.status },
+      mp3: { code: mp3.code, status: mp3.status },
+      outputArtifactsCreated,
+      resourcesAfterFlac,
+      resourcesAfterInvalidMp3,
+      resourcesAfterMp3,
+      resourcesAfterWav,
+      wav: { code: wav.code, status: wav.status },
+    };
+  } finally {
+    await engine.dispose();
+    disposed = true;
+  }
+
+  if (probeResult === undefined) {
+    throw new Error('Output support probes did not complete.');
+  }
+  return { ...probeResult, disposed };
+};
+
+window.runSingleOutputPreset = async (presetId) => {
+  let worker: Worker | undefined;
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    workerFactory: () => {
+      worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      return worker;
+    },
+  });
+  try {
+    const result = await transcodePreset(engine, presetId);
+    return {
+      ...result,
+      workerResources: await readWorkerResourceEntries(worker!),
+    };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runMp3ConstraintMatrix = async () => {
+  let worker: Worker | undefined;
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    workerFactory: () => {
+      worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      return worker;
+    },
+  });
+  const invalid: Array<{
+    errorCode: string;
+    presetId: AudioStreamOutputPresetId;
+    sampleRate: number;
+  }> = [];
+
+  try {
+    for (const sampleRate of MP3_128KBPS_REJECTED_SAMPLE_RATES) {
+      try {
+        await transcodePreset(engine, 'mp3-128kbps', sampleRate);
+        invalid.push({
+          errorCode: 'NO_ERROR',
+          presetId: 'mp3-128kbps',
+          sampleRate,
+        });
+      } catch (error) {
+        invalid.push({
+          errorCode: errorCode(error),
+          presetId: 'mp3-128kbps',
+          sampleRate,
+        });
+      }
+    }
+    for (const presetId of MP3_HIGH_BITRATE_PRESETS) {
+      for (const sampleRate of MP3_REJECTED_SAMPLE_RATES) {
+        try {
+          await transcodePreset(engine, presetId, sampleRate);
+          invalid.push({ errorCode: 'NO_ERROR', presetId, sampleRate });
+        } catch (error) {
+          invalid.push({ errorCode: errorCode(error), presetId, sampleRate });
+        }
+      }
+    }
+
+    const resourcesBeforeAcceptedEncoding = await readWorkerResourceEntries(
+      worker!,
+    );
+    const accepted: BrowserMatrixResult[] = [];
+    for (const [presetId, sampleRates] of MP3_ACCEPTED_MATRIX) {
+      for (const sampleRate of sampleRates) {
+        accepted.push(await transcodePreset(engine, presetId, sampleRate));
+      }
+    }
+
+    return { accepted, invalid, resourcesBeforeAcceptedEncoding };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runInputProbeMatrix = async () => {
+  const capabilities = AUDIO_TRANSCODER_STREAM_CAPABILITIES;
+  const engine = createAudioTranscoderStreamWorkerEngine();
+
+  try {
+    const source = cafInput(INPUT_FIXTURE_FRAMES);
+    const mp3 = await encodeFixture(engine, source, 'mp3-128kbps');
+    const flac = await encodeFixture(engine, source, 'flac-16bit');
+    const fixtures: readonly Fixture[] = [
+      {
+        capabilityId: 'caf-lpcm',
+        input: source,
+        name: 'caf',
+      },
+      {
+        capabilityId: 'aiff-pcm',
+        input: {
+          blob: createPcm16Aiff(INPUT_FIXTURE_FRAMES),
+          name: 'matrix.aiff',
+        },
+        name: 'aiff',
+      },
+      {
+        capabilityId: 'wave',
+        input: {
+          blob: createPcm16Wav(INPUT_FIXTURE_FRAMES),
+          name: 'matrix.wav',
+        },
+        name: 'wav',
+      },
+      {
+        capabilityId: 'mp3',
+        input: { blob: mp3, name: 'matrix.mp3' },
+        name: 'mp3',
+      },
+      {
+        capabilityId: 'flac',
+        input: { blob: flac, name: 'matrix.flac' },
+        name: 'flac',
+      },
+      {
+        capabilityId: null,
+        input: {
+          blob: new Blob(['not an audio container'], {
+            type: 'application/octet-stream',
+          }),
+          name: 'unknown.bin',
+        },
+        name: 'unknown',
+      },
+    ];
+
+    const results: InputProbeFixtureResult[] = [];
+    for (const fixture of fixtures) {
+      results.push(await probeFixture(engine, fixture));
+    }
+
+    return {
+      advertised: capabilities.inputFormats.map((format) => ({
+        extensionHints: [...format.extensionHints],
+        id: format.id,
+        path: format.path,
+      })),
+      fixtures: results,
+    };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runBoundedStreamStress = async () => {
+  const engine = createAudioTranscoderStreamWorkerEngine();
+  const sink = new SlowSeekableDiscardSink();
+  let progressEvents = 0;
+
+  try {
+    const result = await engine.transcode(
+      cafInput(2_000_000),
+      {
+        channels: 1,
+        dither: 'none',
+        presetId: 'wav-pcm24',
+        sampleRate: SAMPLE_RATE,
+      },
+      sink.stream,
+      {
+        inputReadBytes: CHUNK_BYTES,
+        onProgress: () => {
+          progressEvents += 1;
+        },
+        outputChunkBytes: CHUNK_BYTES,
+        pcmChunkBytes: CHUNK_BYTES,
+      },
+    );
+    return {
+      bytesWritten: result.bytesWritten,
+      closed: sink.closed,
+      maxChunkBytes: sink.maxChunkBytes,
+      progressEvents,
+      writes: sink.writes,
+    };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runOutputSessionSmoke = async () => {
+  const namespace = `matrix-${crypto.randomUUID()}`;
+  const session = createAudioTranscoderOutputSession({
+    memoryLimitBytes: 2 * 1024 * 1024,
+    namespace,
+  });
+  let engine: AudioTranscoderStreamWorkerEngine | undefined =
+    createAudioTranscoderStreamWorkerEngine();
+  let pending: Awaited<ReturnType<typeof session.create>> | undefined;
+  let artifact:
+    | Awaited<ReturnType<NonNullable<typeof pending>['complete']>>
+    | undefined;
+
+  try {
+    const storage = await session.getStorageMode();
+    pending = await session.create();
+    const result = await engine.transcode(
+      cafInput(MATRIX_FRAMES),
+      {
+        channels: 1,
+        dither: 'none',
+        presetId: 'wav-pcm24',
+        sampleRate: SAMPLE_RATE,
+      },
+      pending.stream,
+      { outputChunkBytes: CHUNK_BYTES },
+    );
+
+    await engine.dispose();
+    engine = undefined;
+    artifact = await pending.complete({
+      mimeType: 'audio/wav',
+      name: 'session-output.wav',
+    });
+    const header = inspectWav(
+      new Uint8Array(await artifact.blob.arrayBuffer()),
+    );
+    const artifactSize = artifact.size;
+    const artifactStorage = artifact.storage;
+    const mimeType = artifact.mimeType;
+    const name = artifact.name;
+    const pendingStorage = pending.storage;
+
+    await artifact.dispose();
+    await artifact.dispose();
+    artifact = undefined;
+    await session.dispose();
+    await session.dispose();
+
+    let createAfterDisposeCode = 'NO_ERROR';
+    try {
+      await session.create();
+    } catch (error) {
+      createAfterDisposeCode = errorCode(error);
+    }
+
+    return {
+      artifactSize,
+      artifactStorage,
+      bitDepth: header.bitDepth,
+      bytesWritten: result.bytesWritten,
+      channels: header.channels,
+      createAfterDisposeCode,
+      mimeType,
+      name,
+      namespaceEntriesAfterDispose:
+        storage === 'opfs' ? await countNamespaceEntries(namespace) : null,
+      pendingStorage,
+      sampleRate: header.sampleRate,
+      storage,
+    };
+  } finally {
+    await engine?.dispose().catch(() => undefined);
+    await artifact?.dispose().catch(() => undefined);
+    await pending?.discard().catch(() => undefined);
+    await session.dispose().catch(() => undefined);
+  }
+};
+
+window.runOpfsAbortSmoke = async () => {
+  if (navigator.storage.getDirectory === undefined) {
+    throw new Error('Origin private file system is unavailable.');
+  }
+  const name = 'audio-transcoder-browser-abort.wav';
+  const original = new Uint8Array([0x64, 0x73, 0x75, 0x62]);
+  const root = await navigator.storage.getDirectory();
+  const handle = await root.getFileHandle(name, { create: true });
+  const seed = await handle.createWritable();
+  await seed.write(original);
+  await seed.close();
+
+  const output = await handle.createWritable();
+  let engine: AudioTranscoderStreamWorkerEngine | undefined =
+    createAudioTranscoderStreamWorkerEngine();
+  const controller = new AbortController();
+  let code = 'NO_ERROR';
+
+  try {
+    const operation = engine.transcode(
+      cafInput(2_000_000),
+      {
+        channels: 1,
+        dither: 'none',
+        presetId: 'wav-pcm24',
+        sampleRate: SAMPLE_RATE,
+      },
+      output,
+      { signal: controller.signal },
+    );
+    setTimeout(() => controller.abort('browser cancellation'), 0);
+    try {
+      await operation;
+    } catch (error) {
+      code = errorCode(error);
+    }
+
+    await engine.dispose();
+    engine = undefined;
+    const file = await handle.getFile();
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    return {
+      code,
+      originalPreserved:
+        bytes.length === original.length &&
+        bytes.every((value, index) => value === original[index]),
+      size: bytes.length,
+    };
+  } finally {
+    await engine?.dispose().catch(() => undefined);
+    await root.removeEntry(name).catch(() => undefined);
+  }
+};
+
+async function transcodePreset(
+  engine: AudioTranscoderStreamWorkerEngine,
+  presetId: AudioStreamOutputPresetId,
+  targetSampleRate = SAMPLE_RATE,
+  targetChannels = CHANNELS,
+  fixtureFrames = MATRIX_FRAMES,
+): Promise<BrowserMatrixResult> {
+  const sink = new SeekableMemorySink();
+  const progress: number[] = [];
+  const result = await engine.transcode(
+    cafInput(fixtureFrames, targetChannels, targetSampleRate),
+    {
+      channels: targetChannels,
+      dither: 'none',
+      presetId,
+      sampleRate: targetSampleRate,
+    } as AudioStreamTarget,
+    sink.stream,
+    {
+      inputReadBytes: CHUNK_BYTES,
+      onProgress: (event) => progress.push(event.progress),
+      outputChunkBytes: CHUNK_BYTES,
+      pcmChunkBytes: CHUNK_BYTES,
+    },
+  );
+  const closedBeforeResolved = sink.closed;
+  await sink.waitForClose();
+  const bytes = sink.bytes();
+  const format = result.format;
+
+  let bitDepth: number | null = null;
+  let bitrate: number | null = null;
+  let channels = 0;
+  let flacAudioFrame: boolean | null = null;
+  let flacTotalSamples: number | null = null;
+  let formatTag: number | null = null;
+  let mp3Frames: number | null = null;
+  let mp3FrameBitrates: readonly number[] | null = null;
+  let mp3SeekHeader: 'Info' | 'Xing' | null = null;
+  let mp3SeekHeaderFrames: number | null = null;
+  let sampleRate = 0;
+  let wavBlockAlign: number | null = null;
+  let wavByteRate: number | null = null;
+  let wavDataBytes: number | null = null;
+  let wavDataEndsAtFileEnd: boolean | null = null;
+  let wavDataChunks: number | null = null;
+  let wavFmtBytes: number | null = null;
+  let wavFmtChunks: number | null = null;
+  let wavFrames: number | null = null;
+  let wavRiffBytes: number | null = null;
+
+  switch (format) {
+    case 'wav': {
+      const header = inspectWav(bytes);
+      bitDepth = header.bitDepth;
+      channels = header.channels;
+      formatTag = header.formatTag;
+      sampleRate = header.sampleRate;
+      wavBlockAlign = header.blockAlign;
+      wavByteRate = header.byteRate;
+      wavDataBytes = header.dataBytes;
+      wavDataEndsAtFileEnd = header.dataEndsAtFileEnd;
+      wavDataChunks = header.dataChunks;
+      wavFmtBytes = header.fmtBytes;
+      wavFmtChunks = header.fmtChunks;
+      wavFrames = header.frames;
+      wavRiffBytes = header.riffBytes;
+      break;
+    }
+    case 'mp3': {
+      const header = inspectMp3(bytes);
+      bitrate = header.bitrate;
+      channels = header.channels;
+      mp3Frames = header.frames;
+      mp3FrameBitrates = header.frameBitrates;
+      mp3SeekHeader = header.seekHeader;
+      mp3SeekHeaderFrames = header.seekHeaderFrames;
+      sampleRate = header.sampleRate;
+      break;
+    }
+    case 'flac': {
+      const header = inspectFlac(bytes);
+      bitDepth = header.bitDepth;
+      channels = header.channels;
+      flacAudioFrame = header.hasAudioFrame;
+      flacTotalSamples = header.totalSamples;
+      sampleRate = header.sampleRate;
+      break;
+    }
+  }
+
+  return {
+    bitDepth,
+    bitrate,
+    bytesWritten: result.bytesWritten,
+    channels,
+    closedBeforeResolved,
+    finalSize: bytes.byteLength,
+    flacAudioFrame,
+    flacTotalSamples,
+    expectedTotalSamples: fixtureFrames,
+    format,
+    formatTag,
+    maxChunkBytes: sink.maxChunkBytes,
+    mp3Frames,
+    mp3FrameBitrates,
+    mp3SeekHeader,
+    mp3SeekHeaderFrames,
+    presetId,
+    progress,
+    resultDetailsFormat: result.details.format,
+    resultFormat: result.format,
+    resultPresetId: result.preset.id,
+    resultRf64: result.format === 'wav' ? result.details.rf64 : null,
+    sampleRate,
+    wavBlockAlign,
+    wavByteRate,
+    wavDataBytes,
+    wavDataEndsAtFileEnd,
+    wavDataChunks,
+    wavFmtBytes,
+    wavFmtChunks,
+    wavFrames,
+    wavRiffBytes,
+    writes: sink.writes,
+    workerResources: [],
+  };
+}
+
+async function rejectTarget(
+  engine: AudioTranscoderStreamWorkerEngine,
+  presetId: AudioStreamOutputPresetId,
+  target: Readonly<{ channels: number; sampleRate: number }>,
+): Promise<BrowserConstraintRejection> {
+  const sink = new SeekableMemorySink();
+  let code = 'NO_ERROR';
+  try {
+    await engine.transcode(
+      cafInput(1_024),
+      { ...target, dither: 'none', presetId } as AudioStreamTarget,
+      sink.stream,
+      {
+        inputReadBytes: CHUNK_BYTES,
+        outputChunkBytes: CHUNK_BYTES,
+        pcmChunkBytes: CHUNK_BYTES,
+      },
+    );
+  } catch (error) {
+    code = errorCode(error);
+  }
+  return { ...target, errorCode: code, presetId, writes: sink.writes };
+}
+
+async function readWorkerResourceEntries(worker: Worker): Promise<readonly string[]> {
+  const token = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      worker.removeEventListener('message', onMessage);
+      reject(new Error('Timed out reading Worker resource entries.'));
+    }, 5_000);
+    const onMessage = (event: MessageEvent<unknown>): void => {
+      const value = event.data;
+      if (
+        value === null ||
+        typeof value !== 'object' ||
+        !('type' in value) ||
+        value.type !== 'browser-matrix:resource-entries' ||
+        !('token' in value) ||
+        value.token !== token ||
+        !('entries' in value) ||
+        !Array.isArray(value.entries)
+      ) {
+        return;
+      }
+      clearTimeout(timeout);
+      worker.removeEventListener('message', onMessage);
+      resolve(value.entries.filter((entry): entry is string => typeof entry === 'string'));
+    };
+    worker.addEventListener('message', onMessage);
+    worker.postMessage({ token, type: 'browser-matrix:resource-entries' });
+  });
+}
+
+interface Fixture {
+  readonly capabilityId: string | null;
+  readonly input: AudioStreamInput;
+  readonly name: InputProbeFixtureResult['fixture'];
+}
+
+async function probeFixture(
+  engine: AudioTranscoderStreamWorkerEngine,
+  fixture: Fixture,
+): Promise<InputProbeFixtureResult> {
+  const capability =
+    fixture.capabilityId === null
+      ? undefined
+      : AUDIO_TRANSCODER_STREAM_CAPABILITIES.inputFormats.find(
+          ({ id }) => id === fixture.capabilityId,
+        );
+  const probe = await engine.probeInputSupport(fixture.input);
+  const sink = new SeekableMemorySink();
+  let transcodeSucceeded = false;
+  let code: string | null = null;
+  let errorMessage: string | null = null;
+  let errorName: string | null = null;
+  try {
+    await engine.transcode(
+      fixture.input,
+      {
+        channels: 1,
+        dither: 'none',
+        presetId: 'wav-pcm16',
+        sampleRate: SAMPLE_RATE,
+      },
+      sink.stream,
+      {
+        inputReadBytes: CHUNK_BYTES,
+        outputChunkBytes: CHUNK_BYTES,
+        pcmChunkBytes: CHUNK_BYTES,
+      },
+    );
+    await sink.waitForClose();
+    transcodeSucceeded = true;
+  } catch (error) {
+    code = errorCode(error);
+    errorMessage = error instanceof Error ? error.message : String(error);
+    errorName = error instanceof Error ? error.name : null;
+  }
+
+  return {
+    capabilityId: capability?.id ?? null,
+    capabilityPath: capability?.path ?? null,
+    container: probe.inspection?.container ?? null,
+    decodeSupport: probe.inspection?.decodeSupport ?? null,
+    errorCode: code,
+    errorMessage,
+    errorName,
+    fixture: fixture.name,
+    probeStatus: probe.status,
+    transcodeSucceeded,
+  };
+}
+
+async function encodeFixture(
+  engine: AudioTranscoderStreamWorkerEngine,
+  input: AudioStreamInput,
+  presetId: 'flac-16bit' | 'mp3-128kbps',
+): Promise<Blob> {
+  const sink = new SeekableMemorySink();
+  const result = await engine.transcode(
+    input,
+    {
+      channels: CHANNELS,
+      dither: 'none',
+      presetId,
+      sampleRate: SAMPLE_RATE,
+    },
+    sink.stream,
+    {
+      inputReadBytes: CHUNK_BYTES,
+      outputChunkBytes: CHUNK_BYTES,
+      pcmChunkBytes: CHUNK_BYTES,
+    },
+  );
+  await sink.waitForClose();
+  return new Blob([sink.bytes()], { type: result.preset.mimeType });
+}
+
+function createConventionalFlacProbeFixture(): Blob {
+  const frames = 16_375;
+  const header = [0xff, 0xf8, 0x79, 0x18, 0x00, 0x3f, 0xf6];
+  header.push(flacCrc8(header));
+  const frame = new Uint8Array(header.length + 2 + frames * CHANNELS * 2 + 2);
+  frame.set(header);
+  let frameOffset = header.length;
+  for (let channel = 0; channel < CHANNELS; channel += 1) {
+    frame[frameOffset++] = 0x02;
+    for (let index = 0; index < frames; index += 1) {
+      const sample = Math.round(sampleAt(index, channel) * 0x7fff);
+      frame[frameOffset++] = (sample >> 8) & 0xff;
+      frame[frameOffset++] = sample & 0xff;
+    }
+  }
+  const frameCrc = flacCrc16(frame.subarray(0, -2));
+  frame[frameOffset++] = frameCrc >>> 8;
+  frame[frameOffset] = frameCrc & 0xff;
+
+  const bytes = new Uint8Array(4 + 4 + 34 + frame.byteLength);
+  bytes.set([0x66, 0x4c, 0x61, 0x43, 0x80, 0x00, 0x00, 0x22]);
+  const streamInfo = new DataView(bytes.buffer, 8, 34);
+  streamInfo.setUint16(0, frames);
+  streamInfo.setUint16(2, frames);
+  streamInfo.setUint8(4, frame.byteLength >>> 16);
+  streamInfo.setUint8(5, frame.byteLength >>> 8);
+  streamInfo.setUint8(6, frame.byteLength);
+  streamInfo.setUint8(7, frame.byteLength >>> 16);
+  streamInfo.setUint8(8, frame.byteLength >>> 8);
+  streamInfo.setUint8(9, frame.byteLength);
+  const packed =
+    (BigInt(SAMPLE_RATE) << 44n) |
+    (BigInt(CHANNELS - 1) << 41n) |
+    (15n << 36n) |
+    BigInt(frames);
+  streamInfo.setBigUint64(10, packed);
+  bytes.set(frame, 42);
+  return new Blob([bytes], { type: 'audio/flac' });
+}
+
+function flacCrc8(bytes: readonly number[]): number {
+  let crc = 0;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = ((crc << 1) ^ ((crc & 0x80) === 0 ? 0 : 0x07)) & 0xff;
+    }
+  }
+  return crc;
+}
+
+function flacCrc16(bytes: Uint8Array): number {
+  let crc = 0;
+  for (const byte of bytes) {
+    crc ^= byte << 8;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = ((crc << 1) ^ ((crc & 0x8000) === 0 ? 0 : 0x8005)) & 0xffff;
+    }
+  }
+  return crc;
+}
+
+function cafInput(
+  frames: number,
+  channels = CHANNELS,
+  sampleRate = SAMPLE_RATE,
+): AudioStreamInput {
+  return {
+    blob: createFloat32Caf(frames, channels, sampleRate),
+    name: 'browser-matrix.caf',
+  };
+}
+
+function createFloat32Caf(
+  frames: number,
+  channels: number,
+  sampleRate: number,
+): Blob {
+  const bytesPerSample = 4;
+  const payloadBytes = frames * channels * bytesPerSample;
+  const buffer = new ArrayBuffer(68 + payloadBytes);
+  const view = new DataView(buffer);
+
+  writeAscii(view, 0, 'caff');
+  view.setUint16(4, 1, false);
+  writeAscii(view, 8, 'desc');
+  view.setBigInt64(12, 32n, false);
+  view.setFloat64(20, sampleRate, false);
+  writeAscii(view, 28, 'lpcm');
+  view.setUint32(32, 1 | 4, false);
+  view.setUint32(36, bytesPerSample * channels, false);
+  view.setUint32(40, 1, false);
+  view.setUint32(44, channels, false);
+  view.setUint32(48, 32, false);
+  writeAscii(view, 52, 'data');
+  view.setBigInt64(56, BigInt(payloadBytes + 4), false);
+
+  for (let frame = 0; frame < frames; frame += 1) {
+    for (let channel = 0; channel < channels; channel += 1) {
+      view.setFloat32(
+        68 + (frame * channels + channel) * bytesPerSample,
+        sampleAt(frame, channel),
+        false,
+      );
+    }
+  }
+
+  return new Blob([buffer], { type: 'audio/x-caf' });
+}
+
+function createPcm16Wav(frames: number): Blob {
+  const bytesPerSample = 2;
+  const dataBytes = frames * CHANNELS * bytesPerSample;
+  const buffer = new ArrayBuffer(44 + dataBytes);
+  const view = new DataView(buffer);
+
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, buffer.byteLength - 8, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, CHANNELS, true);
+  view.setUint32(24, SAMPLE_RATE, true);
+  view.setUint32(28, SAMPLE_RATE * CHANNELS * bytesPerSample, true);
+  view.setUint16(32, CHANNELS * bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, dataBytes, true);
+  writePcm16(view, 44, frames, true);
+  return new Blob([buffer], { type: 'audio/wav' });
+}
+
+function createPcm16Aiff(frames: number): Blob {
+  const bytesPerSample = 2;
+  const dataBytes = frames * CHANNELS * bytesPerSample;
+  const buffer = new ArrayBuffer(54 + dataBytes);
+  const view = new DataView(buffer);
+
+  writeAscii(view, 0, 'FORM');
+  view.setUint32(4, buffer.byteLength - 8, false);
+  writeAscii(view, 8, 'AIFF');
+  writeAscii(view, 12, 'COMM');
+  view.setUint32(16, 18, false);
+  view.setUint16(20, CHANNELS, false);
+  view.setUint32(22, frames, false);
+  view.setUint16(26, 16, false);
+  writeSampleRate44100Extended80(view, 28);
+  writeAscii(view, 38, 'SSND');
+  view.setUint32(42, dataBytes + 8, false);
+  view.setUint32(46, 0, false);
+  view.setUint32(50, 0, false);
+  writePcm16(view, 54, frames, false);
+  return new Blob([buffer], { type: 'audio/aiff' });
+}
+
+function writePcm16(
+  view: DataView,
+  offset: number,
+  frames: number,
+  littleEndian: boolean,
+): void {
+  for (let frame = 0; frame < frames; frame += 1) {
+    for (let channel = 0; channel < CHANNELS; channel += 1) {
+      const sample = Math.max(-1, Math.min(1, sampleAt(frame, channel)));
+      view.setInt16(
+        offset + (frame * CHANNELS + channel) * 2,
+        Math.round(sample * 0x7fff),
+        littleEndian,
+      );
+    }
+  }
+}
+
+function sampleAt(frame: number, channel: number): number {
+  return 0.5 * Math.sin((2 * Math.PI * (frame + channel * 7)) / 31);
+}
+
+function writeSampleRate44100Extended80(view: DataView, offset: number): void {
+  const bytes = [0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0] as const;
+  for (let index = 0; index < bytes.length; index += 1) {
+    view.setUint8(offset + index, bytes[index]);
+  }
+}
+
+function inspectWav(bytes: Uint8Array): {
+  readonly bitDepth: number;
+  readonly blockAlign: number;
+  readonly byteRate: number;
+  readonly channels: number;
+  readonly dataBytes: number;
+  readonly dataChunks: number;
+  readonly dataEndsAtFileEnd: boolean;
+  readonly fmtBytes: number;
+  readonly fmtChunks: number;
+  readonly formatTag: number;
+  readonly frames: number;
+  readonly riffBytes: number;
+  readonly sampleRate: number;
+} {
+  if (readAscii(bytes, 0, 4) !== 'RIFF' || readAscii(bytes, 8, 4) !== 'WAVE') {
+    throw new Error('Output is not a RIFF/WAVE file.');
+  }
+
+  const view = dataView(bytes);
+  const riffBytes = view.getUint32(4, true);
+  if (riffBytes + 8 !== bytes.byteLength) {
+    throw new Error('Output WAV RIFF size is not finalized to the file size.');
+  }
+  let format:
+    | {
+        readonly bitDepth: number;
+        readonly blockAlign: number;
+        readonly byteRate: number;
+        readonly channels: number;
+        readonly fmtBytes: number;
+        readonly formatTag: number;
+        readonly sampleRate: number;
+      }
+    | undefined;
+  let dataBytes: number | undefined;
+  let dataEndsAtFileEnd = false;
+  let dataChunks = 0;
+  let fmtChunks = 0;
+  let offset = 12;
+  while (offset + 8 <= bytes.byteLength) {
+    const chunkId = readAscii(bytes, offset, 4);
+    const chunkBytes = view.getUint32(offset + 4, true);
+    if (offset + 8 + chunkBytes > bytes.byteLength) {
+      throw new Error(`WAV ${chunkId} chunk exceeds the file.`);
+    }
+    if (chunkId === 'fmt ') {
+      fmtChunks += 1;
+      if (chunkBytes !== 16 || fmtChunks !== 1) {
+        throw new Error('Output WAV must contain one canonical 16-byte fmt chunk.');
+      }
+      format = {
+        bitDepth: view.getUint16(offset + 22, true),
+        blockAlign: view.getUint16(offset + 20, true),
+        byteRate: view.getUint32(offset + 16, true),
+        channels: view.getUint16(offset + 10, true),
+        fmtBytes: chunkBytes,
+        formatTag: view.getUint16(offset + 8, true),
+        sampleRate: view.getUint32(offset + 12, true),
+      };
+    } else if (chunkId === 'data') {
+      dataChunks += 1;
+      if (dataChunks !== 1) {
+        throw new Error('Output WAV contains multiple data chunks.');
+      }
+      dataBytes = chunkBytes;
+      dataEndsAtFileEnd = offset + 8 + chunkBytes === bytes.byteLength;
+    }
+    offset += 8 + chunkBytes + (chunkBytes % 2);
+  }
+  if (format === undefined || dataBytes === undefined || dataBytes === 0) {
+    throw new Error('Output WAV is missing a valid fmt or data chunk.');
+  }
+  if (format.blockAlign === 0 || dataBytes % format.blockAlign !== 0) {
+    throw new Error('Output WAV data is not an exact number of sample frames.');
+  }
+  return {
+    ...format,
+    dataBytes,
+    dataChunks,
+    dataEndsAtFileEnd,
+    fmtChunks,
+    frames: dataBytes / format.blockAlign,
+    riffBytes,
+  };
+}
+
+function inspectMp3(bytes: Uint8Array): {
+  readonly bitrate: number;
+  readonly channels: number;
+  readonly frames: number;
+  readonly frameBitrates: readonly number[];
+  readonly sampleRate: number;
+  readonly seekHeader: 'Info' | 'Xing' | null;
+  readonly seekHeaderFrames: number | null;
+} {
+  const start = skipId3v2(bytes);
+  const first = findMp3Frame(bytes, start);
+  if (first === null) {
+    throw new Error('Output MP3 has no valid MPEG Layer III frame.');
+  }
+
+  const sideInfoBytes = first.version === 1
+    ? first.channels === 1
+      ? 17
+      : 32
+    : first.channels === 1
+      ? 9
+      : 17;
+  const standardMarkerOffset =
+    first.offset + 4 + (first.hasCrc ? 2 : 0) + sideInfoBytes;
+  const markerOffset = findMp3SeekHeaderOffset(
+    bytes,
+    standardMarkerOffset,
+    first.offset + first.frameBytes,
+  );
+  const marker = markerOffset === null ? '' : readAscii(bytes, markerOffset, 4);
+  const seekHeader = marker === 'Info' || marker === 'Xing' ? marker : null;
+  let seekHeaderFrames: number | null = null;
+  if (
+    seekHeader !== null &&
+    markerOffset !== null &&
+    markerOffset + 12 <= bytes.byteLength
+  ) {
+    const view = dataView(bytes);
+    const flags = view.getUint32(markerOffset + 4, false);
+    if ((flags & 1) !== 0) {
+      seekHeaderFrames = view.getUint32(markerOffset + 8, false);
+    }
+  }
+
+  let frames = 0;
+  let offset = first.offset;
+  let audioBitrate = seekHeader === null ? first.bitrate : null;
+  const frameBitrates: number[] = [];
+  while (offset + 4 <= bytes.byteLength) {
+    const frame = parseMp3Frame(bytes, offset);
+    if (
+      frame === null ||
+      frame.sampleRate !== first.sampleRate ||
+      frame.channels !== first.channels ||
+      offset + frame.frameBytes > bytes.byteLength
+    ) {
+      break;
+    }
+    frames += 1;
+    frameBitrates.push(frame.bitrate);
+    if (audioBitrate === null && frames > 1) {
+      audioBitrate = frame.bitrate;
+    }
+    offset += frame.frameBytes;
+  }
+  if (frames === 0 || audioBitrate === null) {
+    throw new Error('Output MP3 has no complete audio frame.');
+  }
+
+  return {
+    bitrate: audioBitrate,
+    channels: first.channels,
+    frameBitrates,
+    frames,
+    sampleRate: first.sampleRate,
+    seekHeader,
+    seekHeaderFrames,
+  };
+}
+
+function findMp3SeekHeaderOffset(
+  bytes: Uint8Array,
+  standardOffset: number,
+  frameEnd: number,
+): number | null {
+  for (
+    let offset = Math.max(0, standardOffset - 32);
+    offset + 4 <= Math.min(frameEnd, bytes.byteLength);
+    offset += 1
+  ) {
+    const marker = readAscii(bytes, offset, 4);
+    if (marker === 'Info' || marker === 'Xing') {
+      return offset;
+    }
+  }
+  return null;
+}
+
+interface Mp3Frame {
+  readonly bitrate: number;
+  readonly channels: number;
+  readonly frameBytes: number;
+  readonly hasCrc: boolean;
+  readonly offset: number;
+  readonly sampleRate: number;
+  readonly version: 1 | 2 | 2.5;
+}
+
+function findMp3Frame(bytes: Uint8Array, start: number): Mp3Frame | null {
+  for (let offset = start; offset + 4 <= bytes.byteLength; offset += 1) {
+    const frame = parseMp3Frame(bytes, offset);
+    if (frame !== null && offset + frame.frameBytes <= bytes.byteLength) {
+      return frame;
+    }
+  }
+  return null;
+}
+
+function parseMp3Frame(bytes: Uint8Array, offset: number): Mp3Frame | null {
+  if (offset + 4 > bytes.byteLength) {
+    return null;
+  }
+  const header = dataView(bytes).getUint32(offset, false);
+  if ((header >>> 21) !== 0x7ff) {
+    return null;
+  }
+  const versionBits = (header >>> 19) & 3;
+  const layerBits = (header >>> 17) & 3;
+  const bitrateIndex = (header >>> 12) & 0xf;
+  const rateIndex = (header >>> 10) & 3;
+  if (
+    versionBits === 1 ||
+    layerBits !== 1 ||
+    bitrateIndex === 0 ||
+    bitrateIndex === 0xf ||
+    rateIndex === 3
+  ) {
+    return null;
+  }
+  const version = versionBits === 3 ? 1 : versionBits === 2 ? 2 : 2.5;
+  const bitrateKbps = (version === 1
+    ? [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+    : [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+  )[bitrateIndex];
+  if (bitrateKbps === undefined) {
+    return null;
+  }
+  const baseRate = [44_100, 48_000, 32_000][rateIndex];
+  if (baseRate === undefined) {
+    return null;
+  }
+  const sampleRate = baseRate / (version === 1 ? 1 : version === 2 ? 2 : 4);
+  const bitrate = bitrateKbps * 1_000;
+  const padding = (header >>> 9) & 1;
+  const frameBytes =
+    Math.floor(((version === 1 ? 144 : 72) * bitrate) / sampleRate) + padding;
+  return {
+    bitrate,
+    channels: ((header >>> 6) & 3) === 3 ? 1 : 2,
+    frameBytes,
+    hasCrc: ((header >>> 16) & 1) === 0,
+    offset,
+    sampleRate,
+    version,
+  };
+}
+
+function skipId3v2(bytes: Uint8Array): number {
+  if (readAscii(bytes, 0, 3) !== 'ID3' || bytes.byteLength < 10) {
+    return 0;
+  }
+  const size =
+    ((bytes[6]! & 0x7f) << 21) |
+    ((bytes[7]! & 0x7f) << 14) |
+    ((bytes[8]! & 0x7f) << 7) |
+    (bytes[9]! & 0x7f);
+  const footerBytes = (bytes[5]! & 0x10) === 0 ? 0 : 10;
+  return 10 + size + footerBytes;
+}
+
+function inspectFlac(bytes: Uint8Array): {
+  readonly bitDepth: number;
+  readonly channels: number;
+  readonly hasAudioFrame: boolean;
+  readonly sampleRate: number;
+  readonly totalSamples: number;
+} {
+  if (readAscii(bytes, 0, 4) !== 'fLaC') {
+    throw new Error('Output is not a FLAC file.');
+  }
+
+  let offset = 4;
+  let streamInfo:
+    | {
+        readonly bitDepth: number;
+        readonly channels: number;
+        readonly sampleRate: number;
+        readonly totalSamples: number;
+      }
+    | undefined;
+  let last = false;
+  while (!last) {
+    if (offset + 4 > bytes.byteLength) {
+      throw new Error('FLAC metadata header is truncated.');
+    }
+    const header = bytes[offset]!;
+    last = (header & 0x80) !== 0;
+    const type = header & 0x7f;
+    const length =
+      (bytes[offset + 1]! << 16) |
+      (bytes[offset + 2]! << 8) |
+      bytes[offset + 3]!;
+    const dataOffset = offset + 4;
+    if (dataOffset + length > bytes.byteLength) {
+      throw new Error('FLAC metadata block exceeds the file.');
+    }
+    if (type === 0) {
+      if (length !== 34 || streamInfo !== undefined) {
+        throw new Error('FLAC STREAMINFO metadata is invalid.');
+      }
+      let packed = 0n;
+      for (let index = 0; index < 8; index += 1) {
+        packed = (packed << 8n) | BigInt(bytes[dataOffset + 10 + index]!);
+      }
+      streamInfo = {
+        bitDepth: Number((packed >> 36n) & 0x1fn) + 1,
+        channels: Number((packed >> 41n) & 0x7n) + 1,
+        sampleRate: Number((packed >> 44n) & 0xfffffn),
+        totalSamples: Number(packed & 0xf_ffff_ffffn),
+      };
+    }
+    offset = dataOffset + length;
+  }
+  if (streamInfo === undefined || streamInfo.totalSamples === 0) {
+    throw new Error('FLAC STREAMINFO was not finalized with a sample count.');
+  }
+  const hasAudioFrame =
+    offset + 2 <= bytes.byteLength &&
+    bytes[offset] === 0xff &&
+    (bytes[offset + 1]! & 0xfc) === 0xf8;
+  return { ...streamInfo, hasAudioFrame };
+}
+
+function writeAscii(view: DataView, offset: number, value: string): void {
+  for (let index = 0; index < value.length; index += 1) {
+    view.setUint8(offset + index, value.charCodeAt(index));
+  }
+}
+
+function readAscii(bytes: Uint8Array, offset: number, length: number): string {
+  if (offset < 0 || offset + length > bytes.byteLength) {
+    return '';
+  }
+  return String.fromCharCode(...bytes.subarray(offset, offset + length));
+}
+
+function dataView(bytes: Uint8Array): DataView {
+  return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+function errorCode(error: unknown): string {
+  return error !== null &&
+    typeof error === 'object' &&
+    'code' in error &&
+    typeof error.code === 'string'
+    ? error.code
+    : 'UNKNOWN_ERROR';
+}
+
+async function countNamespaceEntries(namespace: string): Promise<number> {
+  const root = await navigator.storage.getDirectory();
+  let directory: FileSystemDirectoryHandle;
+  try {
+    directory = await root.getDirectoryHandle(namespace);
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'NotFoundError') {
+      return 0;
+    }
+    throw error;
+  }
+  const iterable = directory as FileSystemDirectoryHandle & {
+    entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
+  };
+  let count = 0;
+  for await (const _entry of iterable.entries()) {
+    count += 1;
+  }
+  return count;
+}
+
+class SeekableMemorySink {
+  private data = new Uint8Array();
+  private readonly resolveClosed: () => void;
+  private readonly closedPromise: Promise<void>;
+  closed = false;
+  maxChunkBytes = 0;
+  readonly stream: AudioStreamOutput;
+  writes = 0;
+
+  constructor() {
+    let resolveClosed = (): void => undefined;
+    this.closedPromise = new Promise((resolve) => {
+      resolveClosed = resolve;
+    });
+    this.resolveClosed = resolveClosed;
+    this.stream = new WritableStream<AudioStreamOutputChunk>({
+      close: () => {
+        this.closed = true;
+        this.resolveClosed();
+      },
+      write: ({ data, position, type }) => {
+        if (
+          type !== 'write' ||
+          !Number.isSafeInteger(position) ||
+          position < 0
+        ) {
+          throw new Error('Encoder emitted an invalid seekable write.');
+        }
+        this.maxChunkBytes = Math.max(this.maxChunkBytes, data.byteLength);
+        this.writes += 1;
+        const end = position + data.byteLength;
+        if (end > this.data.byteLength) {
+          const expanded = new Uint8Array(end);
+          expanded.set(this.data);
+          this.data = expanded;
+        }
+        this.data.set(data, position);
+      },
+    });
+  }
+
+  bytes(): Uint8Array<ArrayBuffer> {
+    return this.data;
+  }
+
+  async waitForClose(): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        this.closedPromise,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error('Output stream did not close.')),
+            5_000,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+}
+
+class SlowSeekableDiscardSink {
+  closed = false;
+  maxChunkBytes = 0;
+  readonly stream: AudioStreamOutput;
+  writes = 0;
+
+  constructor() {
+    const sink = this;
+    this.stream = new WritableStream<AudioStreamOutputChunk>({
+      close() {
+        sink.closed = true;
+      },
+      async write({ data }) {
+        sink.maxChunkBytes = Math.max(sink.maxChunkBytes, data.byteLength);
+        sink.writes += 1;
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      },
+    });
+  }
+}

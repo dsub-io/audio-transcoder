@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createAudioTranscoderEngine } from '../index.js';
+import { AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES } from '../engine/buffer-policy.js';
 import { writeAscii } from './binary.js';
 import { cafDecoder, cafInspector } from './caf.js';
 
@@ -25,6 +26,10 @@ describe('CAF LPCM codec', () => {
       sampleRate: 48_000,
     });
     expect(inspection.durationSeconds).toBeCloseTo(2 / 48_000, 10);
+    expect(cafDecoder.estimateDecodedPcm?.({ data })).toEqual({
+      channels: 2,
+      frames: 2,
+    });
     expect(decoded.source).toBe('CAF LPCM decoder');
     expect([...decoded.channelData[0]!]).toEqual([0.5, 32_767 / 32_768]);
     expect([...decoded.channelData[1]!]).toEqual([-0.5, -1]);
@@ -49,6 +54,21 @@ describe('CAF LPCM codec', () => {
     ]);
   });
 
+  it('decodes 64-bit floating-point PCM into Float32 channels', async () => {
+    const payload = new ArrayBuffer(8);
+    new DataView(payload).setFloat64(0, 0.25, true);
+    const data = createCaf({
+      bitDepth: 64,
+      bytesPerPacket: 8,
+      flags: 1,
+      payload: new Uint8Array(payload),
+    });
+
+    expect([...(await engine.decode({ data })).channelData[0]!]).toEqual([
+      0.25,
+    ]);
+  });
+
   it('decodes unsigned 8-bit integer PCM', async () => {
     const data = createCaf({
       bitDepth: 8,
@@ -57,13 +77,59 @@ describe('CAF LPCM codec', () => {
       payload: new Uint8Array([0, 128, 255]),
     });
 
-    expect(engine.inspect({ data }).codec).toBe('lpcm integer LE');
+    expect(engine.inspect({ data }).codec).toBe('lpcm unsigned int LE');
     expect([...(await engine.decode({ data })).channelData[0]!]).toEqual([
       -1,
       0,
       127 / 128,
     ]);
   });
+
+  it('rejects a sub-limit CAF source that expands past the PCM limit', async () => {
+    const frames =
+      AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES /
+        Float32Array.BYTES_PER_ELEMENT +
+      1;
+    const data = createCaf({
+      bitDepth: 8,
+      bytesPerPacket: 1,
+      flags: 0,
+      payload: new Uint8Array(frames),
+    });
+
+    expect(data.byteLength).toBeLessThan(
+      AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES,
+    );
+    expect(await cafDecoder.estimateDecodedPcm?.({ data })).toEqual({
+      channels: 1,
+      frames,
+    });
+    await expect(engine.decode({ data })).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+    });
+  });
+
+  it.each([16, 24, 32])(
+    'rejects unsigned %i-bit integer PCM before decoding',
+    async (bitDepth) => {
+      const data = createCaf({
+        bitDepth,
+        bytesPerPacket: bitDepth / 8,
+        flags: 0,
+        payload: new Uint8Array(bitDepth / 8),
+      });
+
+      expect(cafInspector.inspect({ data })).toMatchObject({
+        decodeSupport: 'browser-dependent',
+        notes: [
+          'CAF LPCM sample representation requires a codec plugin.',
+        ],
+      });
+      await expect(engine.decode({ data })).rejects.toMatchObject({
+        code: 'UNSUPPORTED_INPUT',
+      });
+    },
+  );
 
   it('supports an indefinite final data chunk using the logical file size', () => {
     const data = createCaf({
@@ -76,6 +142,21 @@ describe('CAF LPCM codec', () => {
     const inspection = cafInspector.inspect({ data, size: data.byteLength });
 
     expect(inspection?.durationSeconds).toBeCloseTo(2 / 48_000, 10);
+  });
+
+  it('bounds an oversized final data chunk to the available bytes', () => {
+    const data = createCaf({
+      bitDepth: 16,
+      channels: 1,
+      dataChunkSize: 1_000n,
+      flags: 4,
+      payload: int16Payload([0, 1], true),
+    });
+
+    expect(cafInspector.inspect({ data })?.durationSeconds).toBeCloseTo(
+      2 / 48_000,
+      10,
+    );
   });
 
   it('reports compressed and missing descriptions without claiming built-in decode', async () => {
@@ -91,7 +172,7 @@ describe('CAF LPCM codec', () => {
     const missing = createCaf({ includeDescription: false });
 
     expect(cafInspector.inspect({ data: compressed })).toMatchObject({
-      codec: 'aac  integer LE',
+      codec: 'aac  unsigned int LE',
       decodeSupport: 'browser-dependent',
       durationSeconds: null,
       notes: ['Compressed CAF requires a browser decoder or codec plugin.'],
@@ -123,10 +204,26 @@ describe('CAF LPCM codec', () => {
     },
   );
 
+  it('routes padded LPCM layouts to plugins', async () => {
+    const data = createCaf({
+      bytesPerPacket: 4,
+      payload: new Uint8Array(4),
+    });
+
+    expect(cafInspector.inspect({ data })).toMatchObject({
+      decodeSupport: 'browser-dependent',
+      notes: ['CAF LPCM layout requires a codec plugin.'],
+    });
+    await expect(engine.decode({ data })).rejects.toMatchObject({
+      code: 'UNSUPPORTED_INPUT',
+    });
+  });
+
   it('returns null for unrelated input', async () => {
     const input = { data: new Uint8Array([1, 2, 3]).buffer };
 
     expect(cafInspector.inspect(input)).toBeNull();
+    expect(cafDecoder.estimateDecodedPcm?.(input)).toBeNull();
     await expect(cafDecoder.decode(input)).resolves.toBeNull();
   });
 
@@ -154,6 +251,10 @@ describe('CAF LPCM codec', () => {
       view.setUint32(offset, 0, false);
     }
 
+    expect(cafInspector.inspect({ data })).toMatchObject({
+      decodeSupport: 'browser-dependent',
+      notes: ['CAF LPCM description is invalid.'],
+    });
     await expect(cafDecoder.decode({ data })).rejects.toThrowError(
       expect.objectContaining({ code: 'INVALID_AUDIO_DATA' }),
     );
@@ -177,6 +278,7 @@ describe('CAF LPCM codec', () => {
       sampleRate: Number.POSITIVE_INFINITY,
     });
 
+    expect(cafInspector.inspect({ data })?.durationSeconds).toBeNull();
     await expect(cafDecoder.decode({ data })).rejects.toThrowError(
       expect.objectContaining({ code: 'INVALID_AUDIO_DATA' }),
     );
@@ -220,6 +322,16 @@ describe('CAF LPCM codec', () => {
     expect(cafInspector.inspect({ data })).toMatchObject({
       codec: 'Unknown',
     });
+  });
+
+  it('stops safely at an invalid negative chunk size', () => {
+    const data = new ArrayBuffer(20);
+    const view = new DataView(data);
+    writeAscii(view, 0, 'caff');
+    writeAscii(view, 8, 'bad!');
+    view.setBigInt64(12, -2n, false);
+
+    expect(cafInspector.inspect({ data })).toMatchObject({ codec: 'Unknown' });
   });
 });
 

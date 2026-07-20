@@ -40,12 +40,13 @@ describe('audio worker host', () => {
       sampleRate: 2,
       source: 'test',
     };
-    const engine = createEngine({
-      async decode(_input, options): Promise<DecodedAudio> {
+    const decode = vi.fn(
+      async (_input, options): Promise<DecodedAudio> => {
         options?.onProgress?.(PROGRESS);
         return decoded;
       },
-    });
+    );
+    const engine = createEngine({ decode });
     const postMessage = vi.fn();
     const handleMessage = createWorkerMessageHandler({ engine, postMessage });
 
@@ -53,6 +54,7 @@ describe('audio worker host', () => {
       id: 1,
       input: { data: new ArrayBuffer(1) },
       type: 'decode',
+      unsafeAllowLargeBuffers: true,
     }));
     await flushTasks();
 
@@ -65,6 +67,10 @@ describe('audio worker host', () => {
       2,
       { id: 1, operation: 'decode', type: 'result', value: decoded },
       [buffer],
+    );
+    expect(decode).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ unsafeAllowLargeBuffers: true }),
     );
   });
 
@@ -85,18 +91,24 @@ describe('audio worker host', () => {
               id: 2,
               presetId: PRESET.id,
               type: 'encode',
+              unsafeAllowLargeBuffers: true,
             }
           : {
               id: 2,
               input: { data: new ArrayBuffer(1) },
               presetId: PRESET.id,
               type: 'transcode',
+              unsafeAllowLargeBuffers: true,
             };
 
       handleMessage(messageEvent(request));
       await flushTasks();
 
-      expect(engine[operation]).toHaveBeenCalled();
+      expect(engine[operation]).toHaveBeenCalledWith(
+        expect.anything(),
+        PRESET.id,
+        expect.objectContaining({ unsafeAllowLargeBuffers: true }),
+      );
       expect(postMessage).toHaveBeenCalledWith(
         { id: 2, operation, type: 'result', value: encoded },
         [encoded.data],

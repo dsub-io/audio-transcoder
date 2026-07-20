@@ -66,6 +66,12 @@ export function readPcmSample(
       : view.getUint8(offset) - 128;
     return value / 128;
   }
+  if (!options.signed) {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_INPUT',
+      `Unsupported unsigned ${bitDepth}-bit integer PCM audio.`,
+    );
+  }
   if (bitDepth === 16) {
     return view.getInt16(offset, options.littleEndian) / 32_768;
   }

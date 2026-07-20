@@ -14,18 +14,21 @@ export type AudioWorkerRequest =
       readonly id: number;
       readonly input: AudioInput;
       readonly type: 'decode';
+      readonly unsafeAllowLargeBuffers?: boolean;
     }
   | {
       readonly audio: PcmAudio;
       readonly id: number;
       readonly presetId: string;
       readonly type: 'encode';
+      readonly unsafeAllowLargeBuffers?: boolean;
     }
   | {
       readonly id: number;
       readonly input: AudioInput;
       readonly presetId: string;
       readonly type: 'transcode';
+      readonly unsafeAllowLargeBuffers?: boolean;
     }
   | {
       readonly id: number;
