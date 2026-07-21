@@ -195,6 +195,7 @@ const requiredPackageFileEntries = [
     `codec-build/${codec}/manifest.json`,
     `codec-build/${codec}/verify.mjs`,
   ]),
+  'codec-build/aac/patch-generated-glue.mjs',
   'codec-build/aac/LICENSE.BRIDGE-MPL-2.0.txt',
   'codec-build/aac/LICENSE.FFMPEG-LGPL-2.1.txt',
   'scripts/ogg-opus-build-wasm.sh',
@@ -287,7 +288,9 @@ if (
   containsLargeBase64Literal(aacSourceGlue) ||
   containsLargeBase64Literal(aacBuiltGlue) ||
   !aacSourceGlue.includes('instantiateWasm') ||
-  !aacSourceGlue.includes('aac.generated.wasm') ||
+  aacSourceGlue.includes('aac.generated.wasm') ||
+  aacBuiltGlue.includes('aac.generated.wasm') ||
+  !aacSourceGlue.includes('runtime asset loader through instantiateWasm') ||
   aacBuildManifest.wasmArtifact?.path !== 'codec-build/aac/aac.wasm' ||
   aacBuildManifest.wasmArtifact?.sha256 !==
     codecAssetManifest.assets?.aac?.sha256 ||

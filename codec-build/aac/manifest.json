@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "artifact": {
     "path": "src/stream/runtime/aac.generated.mjs",
-    "sha256": "4af4035a226a9adbc94d6f2f59eda479394b8d8d4abf61b851c30bd55b24f171",
-    "sizeBytes": 15527
+    "sha256": "e1e8467b25fa8401580617ed359067b07c8ceaf5ae662112265040cdba686283",
+    "sizeBytes": 15501
   },
   "wasmArtifact": {
     "path": "codec-build/aac/aac.wasm",

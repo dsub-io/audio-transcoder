@@ -60,7 +60,7 @@ const runtimeBindingsByConfig = new WeakMap<
 let moduleFactory:
   | Promise<
       (
-        options?: BundledAacEmscriptenModuleOptions,
+        options: BundledAacEmscriptenModuleOptions,
       ) => Promise<BundledAacEmscriptenModule>
     >
   | undefined;

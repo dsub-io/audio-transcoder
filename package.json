@@ -32,6 +32,7 @@
     "codec-build/aac/bridge.c",
     "codec-build/aac/build.sh",
     "codec-build/aac/manifest.json",
+    "codec-build/aac/patch-generated-glue.mjs",
     "codec-build/aac/verify.mjs",
     "codec-build/flac/README.md",
     "codec-build/flac/bridge.c",
@@ -91,7 +92,8 @@
     "@vitest/coverage-v8": "^4.1.10",
     "typescript": "6.0.3",
     "vite": "^8.1.5",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "webpack": "^5.101.3"
   },
   "dependencies": {
     "mediabunny": "1.50.9"

@@ -295,7 +295,6 @@ describe('bundled AAC encoder', () => {
     const compile = vi.spyOn(WebAssembly, 'compile');
     extensionMocks.createModule.mockImplementation(
       async (options?: BundledAacEmscriptenModuleOptions) => {
-        expect(options?.wasmBinary).toBeUndefined();
         expect(options?.instantiateWasm).toEqual(expect.any(Function));
         let received = false;
         const exports = options!.instantiateWasm!({}, () => {

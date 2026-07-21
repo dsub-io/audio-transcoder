@@ -26,7 +26,11 @@ available. The script downloads and verifies FFmpeg, builds only `avcodec`,
 checks the thin JavaScript glue and separate raw `aac.wasm` against their
 committed SHA-256 values. `SINGLE_FILE` is deliberately disabled so consumers
 download the verified WASM asset lazily instead of receiving a duplicate
-base64 payload in the engine package.
+base64 payload in the engine package. After Emscripten runs, the build applies
+`patch-generated-glue.mjs` to remove its unused static local-WASM fallback.
+The package runtime always supplies the verified codec asset through
+`instantiateWasm`; failing closed here prevents consumer bundlers from trying
+to resolve or bundle a nonexistent `aac.generated.wasm` file.
 
 Use `--verify-reproduction --output-dir DIR` to write the audited output away
 from the checkout. Pass `--source-dir DIR` to use a previously downloaded

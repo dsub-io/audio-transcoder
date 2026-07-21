@@ -8,18 +8,17 @@ export interface BundledAacEmscriptenModule {
 }
 
 export interface BundledAacEmscriptenModuleOptions {
-  readonly instantiateWasm?: (
+  readonly instantiateWasm: (
     imports: WebAssembly.Imports,
     receiveInstance: (
       instance: WebAssembly.Instance,
       module: WebAssembly.Module,
     ) => void,
   ) => WebAssembly.Exports;
-  readonly wasmBinary?: Uint8Array<ArrayBuffer>;
 }
 
 declare function createBundledAacEmscriptenModule(
-  options?: BundledAacEmscriptenModuleOptions,
+  options: BundledAacEmscriptenModuleOptions,
 ): Promise<BundledAacEmscriptenModule>;
 
 export default createBundledAacEmscriptenModule;
