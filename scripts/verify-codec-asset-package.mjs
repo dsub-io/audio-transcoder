@@ -13,14 +13,11 @@ import {
   CODEC_ASSET_PACKAGE_PUBLISH_GUARD,
   sha256,
 } from './codec-asset-package-contract.mjs';
-import { verifyReleaseState } from './verify-release-state.mjs';
 
 const execFileAsync = promisify(execFile);
 const arguments_ = process.argv.slice(2);
-const releaseMode = arguments_.includes('--release');
-const unknownArguments = arguments_.filter((argument) => argument !== '--release');
-if (unknownArguments.length > 0) {
-  throw new Error(`Unknown codec package verification argument: ${unknownArguments[0]}`);
+if (arguments_.length > 0) {
+  throw new Error(`Unknown codec asset staging argument: ${arguments_[0]}`);
 }
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
@@ -37,9 +34,6 @@ const assetPackage = JSON.parse(
 const manifest = JSON.parse(
   await readFile(resolve(packageDirectory, 'manifest.json'), 'utf8'),
 );
-if (releaseMode) {
-  await verifyReleaseState({ repositoryRoot });
-}
 const expectedIds = [
   'aac',
   'flac',
@@ -56,15 +50,13 @@ if (
   assetPackage.description !== CODEC_ASSET_PACKAGE_DESCRIPTION ||
   assetPackage.author !== enginePackage.author ||
   assetPackage.license !== 'SEE LICENSE IN LICENSE.md' ||
-  (releaseMode
-    ? assetPackage.private !== undefined || assetPackage.scripts !== undefined
-    : assetPackage.private !== true ||
-      assetPackage.scripts?.prepublishOnly !==
-        CODEC_ASSET_PACKAGE_PUBLISH_GUARD) ||
+  assetPackage.private !== true ||
+  assetPackage.scripts?.prepublishOnly !==
+    CODEC_ASSET_PACKAGE_PUBLISH_GUARD ||
   JSON.stringify(assetPackage.repository) !==
     JSON.stringify(enginePackage.repository) ||
   assetPackage.sideEffects !== false ||
-  assetPackage.publishConfig?.access !== 'public' ||
+  assetPackage.publishConfig !== undefined ||
   JSON.stringify(assetPackage.files) !==
     JSON.stringify(CODEC_ASSET_PACKAGE_FILES) ||
   manifest.version !== enginePackage.version ||
@@ -122,33 +114,25 @@ if (
   throw new Error('Codec asset npm tarball path set drifted.');
 }
 
-if (releaseMode) {
+let publicationWasBlocked = false;
+try {
   await execFileAsync(
     'npm',
     ['publish', '--dry-run', '--foreground-scripts'],
     { cwd: packageDirectory },
   );
-} else {
-  let publicationWasBlocked = false;
-  try {
-    await execFileAsync(
-      'npm',
-      ['publish', '--dry-run', '--foreground-scripts'],
-      { cwd: packageDirectory },
-    );
-  } catch (error) {
-    const output = `${error.stdout ?? ''}\n${error.stderr ?? ''}`;
-    if (output.includes(CODEC_ASSET_PACKAGE_PUBLISH_BLOCK_MESSAGE)) {
-      publicationWasBlocked = true;
-    } else {
-      throw error;
-    }
+} catch (error) {
+  const output = `${error.stdout ?? ''}\n${error.stderr ?? ''}`;
+  if (output.includes(CODEC_ASSET_PACKAGE_PUBLISH_BLOCK_MESSAGE)) {
+    publicationWasBlocked = true;
+  } else {
+    throw error;
   }
-  if (!publicationWasBlocked) {
-    throw new Error('Codec asset publication guard did not block npm publish.');
-  }
+}
+if (!publicationWasBlocked) {
+  throw new Error('Codec asset publication guard did not block npm publish.');
 }
 
 console.log(
-  `Verified ${expectedIds.length} version-locked codec assets, ${CODEC_ASSET_LEGAL_FILES.length} legal files, and ${releaseMode ? 'the release candidate' : 'the publication block'} for ${assetPackage.version} (${packReport.size} packed bytes).`,
+  `Verified ${expectedIds.length} version-locked codec assets, ${CODEC_ASSET_LEGAL_FILES.length} legal files, and the publication block for ${assetPackage.version} (${packReport.size} packed bytes).`,
 );

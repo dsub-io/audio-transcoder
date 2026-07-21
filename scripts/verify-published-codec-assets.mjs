@@ -2,16 +2,13 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 
 import {
+  AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH,
   AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST,
-  AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
+  AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY,
   createAudioTranscoderCodecAssetProvider,
   createAudioTranscoderJsDelivrAssetSource,
 } from '../dist/index.js';
-import {
-  CODEC_ASSET_LEGAL_FILES,
-  CODEC_ASSET_PACKAGE_DESCRIPTION,
-  CODEC_ASSET_PACKAGE_FILES,
-} from './codec-asset-package-contract.mjs';
+import { CODEC_ASSET_LEGAL_FILES } from './codec-asset-package-contract.mjs';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -25,7 +22,9 @@ export async function verifyPublishedCodecAssets({
   }
 
   const source = createAudioTranscoderJsDelivrAssetSource();
-  const baseUrl = `https://cdn.jsdelivr.net/npm/${source.packageName}@${source.packageVersion}`;
+  const repositoryBaseUrl =
+    `https://cdn.jsdelivr.net/gh/${source.repository}@${source.tag}`;
+  const assetBaseUrl = `${repositoryBaseUrl}/${source.basePath}`;
   const fetchWithTimeout = (input, init = {}) => {
     const timeoutSignal = AbortSignal.timeout(timeoutMs);
     const signal =
@@ -49,41 +48,16 @@ export async function verifyPublishedCodecAssets({
     return new Uint8Array(await response.arrayBuffer());
   };
 
-  const remotePackage = await readJson(`${baseUrl}/package.json`);
+  const remotePackage = await readJson(`${repositoryBaseUrl}/package.json`);
   assert.equal(
     remotePackage.name,
-    AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
-    'Published codec asset package name does not match the engine contract.',
+    '@dsub/audio-transcoder',
+    'Release tag package name does not match the engine contract.',
   );
   assert.equal(
     remotePackage.version,
     AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version,
-    'Published codec asset package version does not match the engine contract.',
-  );
-  assert.equal(
-    remotePackage.description,
-    CODEC_ASSET_PACKAGE_DESCRIPTION,
-    'Published codec asset package description does not match the release contract.',
-  );
-  assert.equal(
-    remotePackage.author,
-    'dsub.io',
-    'Published codec asset package author does not match the release contract.',
-  );
-  assert.equal(
-    remotePackage.license,
-    'SEE LICENSE IN LICENSE.md',
-    'Published codec asset package license field does not match the release contract.',
-  );
-  assert.equal(
-    remotePackage.sideEffects,
-    false,
-    'Published codec asset package sideEffects field does not match the release contract.',
-  );
-  assert.deepEqual(
-    remotePackage.publishConfig,
-    { access: 'public' },
-    'Published codec asset package publishConfig does not match the release contract.',
+    'Release tag package version does not match the engine contract.',
   );
   assert.deepEqual(
     remotePackage.repository,
@@ -91,25 +65,13 @@ export async function verifyPublishedCodecAssets({
       type: 'git',
       url: 'git+https://github.com/dsub-io/audio-transcoder.git',
     },
-    'Published codec asset repository does not match the public source contract.',
-  );
-  assert.equal(
-    remotePackage.private,
-    undefined,
-    'Published codec asset package must not be private.',
-  );
-  assert.equal(
-    remotePackage.scripts,
-    undefined,
-    'Published codec asset package must not retain development-only scripts.',
-  );
-  assert.deepEqual(
-    remotePackage.files,
-    CODEC_ASSET_PACKAGE_FILES,
-    'Published codec asset package file allowlist does not match the release contract.',
+    'Release tag repository does not match the public source contract.',
   );
 
-  const remoteManifest = await readJson(`${baseUrl}/manifest.json`);
+  assert.equal(source.repository, AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY);
+  assert.equal(source.basePath, AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH);
+
+  const remoteManifest = await readJson(`${assetBaseUrl}/manifest.json`);
   assert.deepEqual(
     remoteManifest,
     AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST,
@@ -133,7 +95,7 @@ export async function verifyPublishedCodecAssets({
   }
 
   for (const descriptor of CODEC_ASSET_LEGAL_FILES) {
-    const url = `${baseUrl}/${descriptor.packagePath}`;
+    const url = `${repositoryBaseUrl}/${descriptor.sourcePath}`;
     await readBytes(url);
     log(`Verified ${url}`);
   }

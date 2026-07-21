@@ -27,10 +27,12 @@ export {
 export { AudioTranscoderError } from './errors.js';
 export {
   AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST,
-  AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
+  AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH,
+  AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY,
   RuntimeAssetError,
   createAudioTranscoderCodecAssetProvider,
   createAudioTranscoderJsDelivrAssetSource,
+  createJsDelivrGitHubRuntimeAssetSource,
   createJsDelivrRuntimeAssetSource,
   createRuntimeAssetProvider,
   createSelfHostedRuntimeAssetSource,
@@ -79,6 +81,7 @@ export type {
   AudioTranscoderCodecAssetProvider,
   CreateAudioTranscoderCodecAssetProviderOptions,
   JsDelivrRuntimeAssetSource,
+  JsDelivrGitHubRuntimeAssetSource,
   RuntimeAssetDescriptor,
   RuntimeAssetErrorCode,
   RuntimeAssetFetch,

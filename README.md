@@ -147,8 +147,9 @@ change fetches only the selected `fast`, `balanced`, or `best` resampler. These
 bytes execute directly in the existing module Worker. They are not embedded in
 the engine package and do not create a nested or Blob Worker.
 
-`@dsub/audio-transcoder-codecs` and `@dsub/audio-transcoder` use the same exact
-package version. The convenience helper is an explicit jsDelivr opt-in:
+Codec assets are versioned with `@dsub/audio-transcoder` in the same public
+GitHub release tag. They are not published as a separate npm package. The
+convenience helper is an explicit jsDelivr opt-in:
 
 ```ts
 import {
@@ -166,12 +167,11 @@ const pool = createAudioTranscoderStreamWorkerPool({
 
 The helper always resolves the engine's baked exact version. For example, an
 engine at `1.2.3` resolves AAC to
-`https://cdn.jsdelivr.net/npm/@dsub/audio-transcoder-codecs@1.2.3/wasm/aac.wasm`;
-it never uses `latest`, a dist-tag, or a SemVer range. This URL is an example of
+`https://cdn.jsdelivr.net/gh/dsub-io/audio-transcoder@v1.2.3/codec-assets/wasm/aac.wasm`;
+it never uses a branch, `latest`, or a SemVer range. This URL is an example of
 the versioned contract, not a claim that an illustrative version is published.
-Every released codec package maps to the public Git tag with the same version;
-that tag contains the exact modified source, build/relink scripts, manifests,
-notices, and upstream archive URLs and hashes described in
+The matching public Git tag contains the exact modified source, build/relink
+scripts, manifests, notices, and upstream archive URLs and hashes described in
 [`codec-assets/README.md`](codec-assets/README.md).
 
 Self-hosting is equally explicit. A primary source and its fallbacks are tried
@@ -520,18 +520,14 @@ Release Please owns semantic versioning, changelog updates, GitHub releases, and
 package version changes. Runtime consumers can use `audioTranscoder.getVersion()`,
 `getVersion()`, or `AUDIO_TRANSCODER_VERSION`.
 
-The engine and `@dsub/audio-transcoder-codecs` are a lockstep pair: both must
-carry the exact Release Please version, and the engine embeds that asset
-manifest/version. Release order is Release Please version generation, build
-and verify the codec asset package from that tag, manually publish the codec
-asset package, verify every stable versioned jsDelivr URL and raw size/SHA-256,
-then manually publish the engine.
-The Release workflow intentionally stops after Release Please; it does not
-publish either npm package. The engine's `prepublishOnly` gate performs the
-jsDelivr verification and refuses publication until the exact asset package,
-all seven raw WASM files, and the audited notice/license payload are available
-byte-for-byte. Do not use `--ignore-scripts`, create manual tags, or edit
-versions around Release Please.
+The engine and its `codec-assets/` tree are one exact-version release. Release
+Please owns the version, public tag, and GitHub release. The Release workflow
+checks the tagged manifest and all seven raw WASM files through the exact
+jsDelivr `/gh/dsub-io/audio-transcoder@v<version>/codec-assets` path, then
+publishes only `@dsub/audio-transcoder` through npm Trusted Publishing (OIDC).
+There is no separate codec npm package, manual publish path, recovery publish,
+or manually created tag. The engine publication gate fails closed until the
+tagged CDN assets pass their size, SHA-256, ABI, schema, and WebAssembly checks.
 
 ## License
 

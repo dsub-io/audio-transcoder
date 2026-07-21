@@ -10,7 +10,6 @@ import {
   CODEC_ASSET_PACKAGE_PUBLISH_GUARD,
 } from './codec-asset-package-contract.mjs';
 import { prepareCodecAssets } from './prepare-codec-assets.mjs';
-import { verifyReleaseState } from './verify-release-state.mjs';
 
 const repositoryRoot = fileURLToPath(new URL('../', import.meta.url));
 const outputDirectory = resolve(
@@ -21,13 +20,8 @@ const packageJson = JSON.parse(
   await readFile(resolve(repositoryRoot, 'package.json'), 'utf8'),
 );
 const arguments_ = process.argv.slice(2);
-const releaseMode = arguments_.includes('--release');
-const unknownArguments = arguments_.filter((argument) => argument !== '--release');
-if (unknownArguments.length > 0) {
-  throw new Error(`Unknown codec package build argument: ${unknownArguments[0]}`);
-}
-if (releaseMode) {
-  await verifyReleaseState({ repositoryRoot });
+if (arguments_.length > 0) {
+  throw new Error(`Unknown codec asset staging argument: ${arguments_[0]}`);
 }
 
 await rm(outputDirectory, { recursive: true, force: true });
@@ -46,14 +40,9 @@ const assetPackage = {
   license: 'SEE LICENSE IN LICENSE.md',
   repository: packageJson.repository,
   sideEffects: false,
-  publishConfig: { access: 'public' },
   files: CODEC_ASSET_PACKAGE_FILES,
-  ...(releaseMode
-    ? {}
-    : {
-        private: true,
-        scripts: { prepublishOnly: CODEC_ASSET_PACKAGE_PUBLISH_GUARD },
-      }),
+  private: true,
+  scripts: { prepublishOnly: CODEC_ASSET_PACKAGE_PUBLISH_GUARD },
 };
 await writeFile(
   resolve(outputDirectory, 'package.json'),

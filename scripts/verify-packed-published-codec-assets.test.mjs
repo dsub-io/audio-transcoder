@@ -63,19 +63,17 @@ test('runs the published-asset verifier from the extracted engine tarball', asyn
         ),
       ]);
 
-    const baseUrl = `https://cdn.jsdelivr.net/npm/${publicApi.AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE}@${publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version}`;
+    const repositoryBaseUrl =
+      `https://cdn.jsdelivr.net/gh/${publicApi.AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY}` +
+      `@v${publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version}`;
+    const assetBaseUrl =
+      `${repositoryBaseUrl}/${publicApi.AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH}`;
     const remotePackage = {
-      author: 'dsub.io',
-      description: releaseContract.CODEC_ASSET_PACKAGE_DESCRIPTION,
-      files: releaseContract.CODEC_ASSET_PACKAGE_FILES,
-      license: 'SEE LICENSE IN LICENSE.md',
-      name: publicApi.AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
-      publishConfig: { access: 'public' },
+      name: '@dsub/audio-transcoder',
       repository: {
         type: 'git',
         url: 'git+https://github.com/dsub-io/audio-transcoder.git',
       },
-      sideEffects: false,
       version: publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version,
     };
     const verified = [];
@@ -83,22 +81,23 @@ test('runs the published-asset verifier from the extracted engine tarball', asyn
     await verifyPublishedCodecAssets({
       fetchAsset: async (input) => {
         const url = String(input);
-        if (url === `${baseUrl}/package.json`) {
+        if (url === `${repositoryBaseUrl}/package.json`) {
           return jsonResponse(remotePackage);
         }
-        if (url === `${baseUrl}/manifest.json`) {
+        if (url === `${assetBaseUrl}/manifest.json`) {
           return jsonResponse(publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST);
         }
 
         const asset = Object.values(
           publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.assets,
-        ).find(({ path }) => url === `${baseUrl}/${path}`);
+        ).find(({ path }) => url === `${assetBaseUrl}/${path}`);
         if (asset !== undefined) {
           return fileResponse(`codec-assets/${asset.path}`);
         }
 
         const legalFile = releaseContract.CODEC_ASSET_LEGAL_FILES.find(
-          ({ packagePath }) => url === `${baseUrl}/${packagePath}`,
+          ({ sourcePath }) =>
+            url === `${repositoryBaseUrl}/${sourcePath}`,
         );
         if (legalFile !== undefined) {
           return fileResponse(legalFile.sourcePath);

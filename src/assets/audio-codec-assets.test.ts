@@ -2,7 +2,8 @@ import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 
 import {
   AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST,
-  AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
+  AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH,
+  AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY,
   createAudioTranscoderCodecAssetProvider,
   createAudioTranscoderJsDelivrAssetSource,
   type AudioTranscoderCodecAssetId,
@@ -14,9 +15,10 @@ describe('audio codec assets', () => {
     const source = createAudioTranscoderJsDelivrAssetSource();
 
     expect(source).toEqual({
-      kind: 'jsdelivr',
-      packageName: AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
-      packageVersion: AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version,
+      basePath: AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH,
+      kind: 'jsdelivr-github',
+      repository: AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY,
+      tag: `v${AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version}`,
     });
     expect(AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST).toMatchObject({
       abiVersion: 1,

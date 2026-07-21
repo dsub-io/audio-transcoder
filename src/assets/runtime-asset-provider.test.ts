@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  createJsDelivrGitHubRuntimeAssetSource,
   createJsDelivrRuntimeAssetSource,
   createRuntimeAssetProvider,
   createSelfHostedRuntimeAssetSource,
@@ -32,6 +33,52 @@ afterEach(() => {
 });
 
 describe('runtime asset sources', () => {
+  it('uses an exact GitHub tag and base path in jsDelivr URLs', () => {
+    const source = createJsDelivrGitHubRuntimeAssetSource(
+      'dsub-io/audio-transcoder',
+      'v1.2.3-beta.4+build.5',
+      'codec-assets',
+    );
+
+    expect(Object.isFrozen(source)).toBe(true);
+    expect(resolveRuntimeAssetUrl(source, 'wasm/aac encoder.wasm')).toBe(
+      'https://cdn.jsdelivr.net/gh/dsub-io/audio-transcoder@v1.2.3-beta.4+build.5/codec-assets/wasm/aac%20encoder.wasm',
+    );
+  });
+
+  it.each(['1.2.3', 'vlatest', 'v^1.2.3', 'v1.2', 'v01.2.3'])(
+    'rejects the non-exact jsDelivr GitHub tag %s',
+    (tag) => {
+      expect(() =>
+        createJsDelivrGitHubRuntimeAssetSource(
+          'dsub-io/audio-transcoder',
+          tag,
+          'codec-assets',
+        ),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_CONFIGURATION' }),
+      );
+    },
+  );
+
+  it.each([
+    ['dsub-io/audio/transcoder', 'codec-assets'],
+    ['dsub-io/audio-transcoder', '../codec-assets'],
+  ])(
+    'rejects an invalid GitHub repository or base path',
+    (repository, basePath) => {
+      expect(() =>
+        createJsDelivrGitHubRuntimeAssetSource(
+          repository,
+          'v1.2.3',
+          basePath,
+        ),
+      ).toThrowError(
+        expect.objectContaining({ code: 'INVALID_CONFIGURATION' }),
+      );
+    },
+  );
+
   it('uses an exact npm version and a stable asset name in jsDelivr URLs', () => {
     const source = createJsDelivrRuntimeAssetSource(
       '@dsub/audio-transcoder-codecs',
@@ -198,6 +245,24 @@ describe('runtime asset manifest validation', () => {
         code: 'INVALID_CONFIGURATION',
         message:
           'jsDelivr package version 1.0.1 does not match manifest version 1.0.0.',
+      }),
+    );
+  });
+
+  it('requires the jsDelivr GitHub tag and manifest versions to match', () => {
+    expect(() =>
+      createProvider(workingFetch(), {
+        source: createJsDelivrGitHubRuntimeAssetSource(
+          'dsub-io/audio-transcoder',
+          'v1.0.1',
+          'codec-assets',
+        ),
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: 'INVALID_CONFIGURATION',
+        message:
+          'jsDelivr GitHub tag v1.0.1 does not match manifest version 1.0.0.',
       }),
     );
   });

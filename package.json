@@ -58,7 +58,6 @@
     "build": "pnpm generate:metadata && node ./scripts/clean-dist.mjs && tsc --project tsconfig.build.json && node ./scripts/copy-runtime-assets.mjs",
     "check": "pnpm typecheck && pnpm test:coverage && pnpm package:smoke && pnpm test:scripts && pnpm codec-assets:smoke",
     "codec-assets:build": "node ./scripts/build-codec-asset-package.mjs",
-    "codec-assets:release": "node ./scripts/build-codec-asset-package.mjs --release && node ./scripts/verify-codec-asset-package.mjs --release && npm pack --dry-run --json ./.artifacts/codec-assets-package",
     "codec-assets:smoke": "pnpm codec-assets:build && node ./scripts/verify-codec-asset-package.mjs && npm pack --dry-run --json ./.artifacts/codec-assets-package",
     "codec-assets:verify-published": "pnpm build && node ./scripts/verify-published-codec-assets.mjs",
     "demo:check": "pnpm build && pnpm codec-assets:build && tsc --project examples/vite/tsconfig.json && vite build --config examples/vite/vite.config.ts && pnpm demo:verify-build",

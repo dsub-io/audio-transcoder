@@ -2,7 +2,8 @@ import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   AIFF_OUTPUT_PRESETS,
   AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST,
-  AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
+  AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH,
+  AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY,
   AUDIO_TRANSCODER_PACKAGE,
   AUDIO_TRANSCODER_VERSION,
   AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES,
@@ -83,9 +84,10 @@ describe('public package metadata', () => {
   });
 
   it('exposes version-locked codec asset metadata without choosing a CDN', () => {
-    expect(AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE).toBe(
-      '@dsub/audio-transcoder-codecs',
+    expect(AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY).toBe(
+      'dsub-io/audio-transcoder',
     );
+    expect(AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH).toBe('codec-assets');
     expect(AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version).toBe(
       AUDIO_TRANSCODER_VERSION,
     );
@@ -101,9 +103,10 @@ describe('public package metadata', () => {
       'resampler-fast',
     ]);
     expect(createAudioTranscoderJsDelivrAssetSource()).toEqual({
-      kind: 'jsdelivr',
-      packageName: '@dsub/audio-transcoder-codecs',
-      packageVersion: AUDIO_TRANSCODER_VERSION,
+      basePath: 'codec-assets',
+      kind: 'jsdelivr-github',
+      repository: 'dsub-io/audio-transcoder',
+      tag: `v${AUDIO_TRANSCODER_VERSION}`,
     });
     expect(createSelfHostedRuntimeAssetSource('/codec-assets/')).toEqual({
       baseUrl: '/codec-assets',

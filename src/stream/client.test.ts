@@ -527,6 +527,36 @@ describe('stream worker client', () => {
     await engine.dispose();
   });
 
+  it('snapshots an exact jsDelivr GitHub asset source for Worker configuration', async () => {
+    const worker = new WorkerStub();
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: {
+        source: {
+          basePath: 'codec-assets',
+          kind: 'jsdelivr-github',
+          repository: 'dsub-io/audio-transcoder',
+          tag: 'v1.2.3',
+        },
+      },
+      workerFactory: () => worker as unknown as Worker,
+    });
+
+    expect(worker.configurations).toEqual([
+      {
+        codecAssets: {
+          source: {
+            basePath: 'codec-assets',
+            kind: 'jsdelivr-github',
+            repository: 'dsub-io/audio-transcoder',
+            tag: 'v1.2.3',
+          },
+        },
+        type: 'configure',
+      },
+    ]);
+    await engine.dispose();
+  });
+
   it('isolates asset-state observers and terminates on configuration errors', async () => {
     const worker = new WorkerStub();
     const engine = createAudioTranscoderStreamWorkerEngine({
@@ -616,6 +646,39 @@ describe('stream worker client', () => {
             kind: 'jsdelivr',
             packageName: 1,
             packageVersion: '1.2.3',
+          },
+        },
+        workerFactory,
+      },
+      {
+        codecAssets: {
+          source: {
+            basePath: 'codec-assets',
+            kind: 'jsdelivr-github',
+            repository: 1,
+            tag: 'v1.2.3',
+          },
+        },
+        workerFactory,
+      },
+      {
+        codecAssets: {
+          source: {
+            basePath: 1,
+            kind: 'jsdelivr-github',
+            repository: 'dsub-io/audio-transcoder',
+            tag: 'v1.2.3',
+          },
+        },
+        workerFactory,
+      },
+      {
+        codecAssets: {
+          source: {
+            basePath: 'codec-assets',
+            kind: 'jsdelivr-github',
+            repository: 'dsub-io/audio-transcoder',
+            tag: 1,
           },
         },
         workerFactory,

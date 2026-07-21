@@ -92,9 +92,9 @@ The default stream runtime has no implicit asset source. The owner must provide
 asset is fetched until an exact probe or conversion needs AAC, Ogg Opus, MP3,
 FLAC, or a resampler quality.
 
-For self-hosting, copy the codec asset package's stable `wasm/` paths beneath a
-versioned base URL and configure that base explicitly, as in the owner example
-above. For jsDelivr, the application must opt in:
+For self-hosting, copy the release tag's stable `codec-assets/wasm/` files
+beneath a versioned base URL and configure that base explicitly, as in the
+owner example above. For jsDelivr, the application must opt in:
 
 ```ts
 import {
@@ -123,11 +123,12 @@ order after load or verification failure. They are not raced. `1.2.3` above is
 an illustrative exact version and must equal the installed engine version in a
 real deployment. For that version the jsDelivr helper resolves stable URLs such
 as
-`https://cdn.jsdelivr.net/npm/@dsub/audio-transcoder-codecs@1.2.3/wasm/flac.wasm`.
-It rejects tags and ranges and never resolves `latest`. This is a contract
+`https://cdn.jsdelivr.net/gh/dsub-io/audio-transcoder@v1.2.3/codec-assets/wasm/flac.wasm`.
+It rejects branches and ranges and never resolves `latest`. This is a contract
 example, not an availability claim for an illustrative version. A released
 version's corresponding source and relink material is the public repository
-tag `v<package-version>`.
+tag `v<package-version>`; codec assets are not published as a separate npm
+package.
 
 The engine bakes the matching schema-version-1 manifest, package version, ABI,
 stable path, decoded byte count, and SHA-256 for every raw asset. Provider
@@ -577,7 +578,7 @@ and [`script-src`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/H
 Cross-origin asset responses must allow CORS. Serve `.wasm` as
 `application/wasm`; gzip or Brotli can compress transport bytes without
 changing the decoded raw size and SHA-256 checked by the runtime. Versioned
-self-host paths and exact jsDelivr package URLs can use immutable caching. The
+self-host paths and exact jsDelivr Git-tag URLs can use immutable caching. The
 asset origin learns which public codec file was requested, but receives no
 input audio from this package.
 
@@ -780,17 +781,15 @@ tag `v<package-version>`, which retains the exact build materials under
 URLs, hashes, revisions, and distribution considerations; it is not legal
 advice.
 
-The engine and codec asset package release in exact-version lockstep. Let
-Release Please establish the engine version, build and verify the asset package
-from that exact tag, manually publish assets first, verify each stable versioned
-jsDelivr URL and its raw byte count/SHA-256, then manually publish the engine.
-Do not invent tags or edit versions around Release Please.
-The Release workflow stops after Release Please and never publishes npm
-packages. Root `npm publish` runs a fail-closed `prepublishOnly` check against
-the exact versioned jsDelivr package, manifest, all seven asset hashes/sizes,
-and WebAssembly validity. Never bypass it with `--ignore-scripts`. This is
-release-order documentation only; it does not authorize or report a
-publication.
+The engine and `codec-assets/` tree release together in one exact public GitHub
+tag. Release Please alone establishes the version, tag, and GitHub release. The
+Release workflow verifies the manifest and all seven raw WASM files through
+`https://cdn.jsdelivr.net/gh/dsub-io/audio-transcoder@v<version>/codec-assets`,
+then publishes only `@dsub/audio-transcoder` through npm Trusted Publishing
+(OIDC) on a GitHub-hosted runner. There is no separate codec npm package,
+manual publish, recovery publish, or manual tag path. The engine publication
+gate checks the exact tagged CDN bytes, sizes, SHA-256 values, ABI, schema, and
+WebAssembly validity before npm publication.
 
 ## Consumer release gate
 
