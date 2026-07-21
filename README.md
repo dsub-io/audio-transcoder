@@ -279,9 +279,14 @@ The current manifest contains:
 Do not copy this table into application logic. Build format-specific controls
 with `getAudioStreamOutputParameters()`: WAV exposes sample format and bit
 depth, AIFF/FLAC expose bit depth, and AAC/Ogg Opus/MP3 expose bitrate. Pass the
-semantic selection and inspected source to `resolveAudioStreamFormatTarget()`
-to obtain the exact source-preserving target and probe target. Then call
-`probeOutputSupport()` for that exact target.
+semantic selection and inspected source to
+`resolveAudioStreamSourceAwareFormatTarget()` with `sampleRate: 'automatic'`
+to preserve a valid source rate or select the nearest valid discrete encoder
+rate. Use `getAudioStreamOutputSampleRateOptions()` when presenting the exact
+pass-through and resampling choices for one preset. Its discriminated result
+reports format, preset, source-inspection, and source-channel failures before
+returning any options. Then call
+`probeOutputSupport()` for the resolved exact target.
 Render `checking` while it runs and enable conversion only for `supported`.
 Gray or omit explicit `unsupported-configuration` and `runtime-unavailable`
 results. A rejected Promise is a retryable operation, resource, queue,
@@ -315,9 +320,9 @@ loading flag. Set the selected control to `checking` before awaiting
 compilation, and codec initialization before the first package progress event.
 There is deliberately no eager `ready()` call that downloads every codec.
 
-Ogg Opus always encodes at its 48 kHz codec clock. A 48 kHz source can keep the
-source rate; any other supported source must select 48 kHz explicitly so the
-resolver and runtime make resampling visible. Lower-rate MP3 combinations are
+Ogg Opus always encodes at its 48 kHz codec clock. Automatic selection keeps a
+48 kHz source and otherwise selects 48 kHz only when both source and target are
+inside the global resampling range. Lower-rate MP3 combinations are
 intentionally absent. LAME can silently encode
 some requested high-bitrate, low-sample-rate combinations at a lower bitrate;
 the public presets reject those combinations instead of misreporting the
@@ -328,6 +333,15 @@ the source rate, also respect `capabilities.limits.sampleRate.resampling`; the
 default runtime allows conversion only from 8,000 through 192,000 Hz. Same-rate
 pass-through uses `limits.sampleRate.passThrough`, currently 8,000 through
 384,000 Hz.
+
+Automatic selection never changes the source-owned channel layout and validates
+it before selecting a rate. It first preserves the source when the preset and
+pass-through path allow it. Otherwise it considers only a discrete preset's
+declared rates, chooses the smallest absolute Hz distance, and chooses the
+higher rate on a tie. Range presets do not supply invented fallback rates;
+callers may pass their own exact candidates only to the option enumerator.
+Lossy capability descriptors report `bitrateMode`: AAC and Ogg Opus are
+`variable`, while MP3 is `constant`.
 
 The processing pipeline is interleaved Float32 PCM. `wav-pcm32` writes a
 32-bit signed-integer WAV container, but its effective retained integer

@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { AudioInspection } from '../engine/contracts.js';
 import {
+  AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+  type AudioTranscoderStreamCapabilities,
+} from './capabilities.js';
+import {
+  AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE,
   getAudioStreamOutputEncodingOptions,
   getAudioStreamOutputParameters,
+  getAudioStreamOutputSampleRateOptions,
   resolveAudioStreamFormatTarget,
+  resolveAudioStreamSourceAwareFormatTarget,
 } from './format-target.js';
 
 const MONO_192K_SOURCE = Object.freeze({
@@ -98,6 +105,14 @@ describe('semantic stream output parameters', () => {
         ],
       },
     ]);
+    expect(getAudioStreamOutputEncodingOptions('aac')[0]).toEqual({
+      bitDepth: null,
+      bitrateBps: 96_000,
+      codec: 'aac',
+      kind: 'lossy',
+      presetId: 'aac-96kbps',
+      sampleFormat: 'lossy',
+    });
   });
 });
 
@@ -247,6 +262,19 @@ describe('semantic stream target resolution', () => {
     ).toMatchObject({ reason: 'channels', status: 'unsupported' });
   });
 
+  it('keeps automatic selection outside the legacy resolver contract', () => {
+    expect(
+      resolveAudioStreamFormatTarget(
+        {
+          formatId: 'ogg',
+          presetId: 'ogg-opus-128kbps',
+          sampleRate: 'automatic' as never,
+        },
+        { ...MONO_192K_SOURCE, sampleRate: 96_000 },
+      ),
+    ).toMatchObject({ reason: 'sample-rate', status: 'unsupported' });
+  });
+
   it('rejects a preset that conflicts with semantic parameters', () => {
     expect(
       resolveAudioStreamFormatTarget(
@@ -283,3 +311,304 @@ describe('semantic stream target resolution', () => {
     });
   });
 });
+
+describe('source-aware stream target resolution', () => {
+  it('preserves a 384 kHz source through a range preset', () => {
+    expect(
+      resolveAudioStreamSourceAwareFormatTarget(
+        {
+          formatId: 'wav',
+          presetId: 'wav-pcm24',
+          sampleRate: AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE,
+        },
+        { ...MONO_192K_SOURCE, sampleRate: 384_000 },
+      ),
+    ).toMatchObject({
+      probeTarget: {
+        channels: 1,
+        presetId: 'wav-pcm24',
+        sampleRate: 384_000,
+      },
+      status: 'resolved',
+      target: { presetId: 'wav-pcm24' },
+    });
+  });
+
+  it('rejects an explicit resampling target outside the global path', () => {
+    expect(
+      resolveAudioStreamSourceAwareFormatTarget(
+        {
+          formatId: 'wav',
+          presetId: 'wav-pcm24',
+          sampleRate: 384_000,
+        },
+        { ...MONO_192K_SOURCE, sampleRate: 48_000 },
+      ),
+    ).toMatchObject({ reason: 'sample-rate', status: 'unsupported' });
+  });
+
+  it('does not resample a source outside the global resampling range', () => {
+    expect(
+      resolveAudioStreamSourceAwareFormatTarget(
+        {
+          formatId: 'ogg',
+          presetId: 'ogg-opus-128kbps',
+          sampleRate: 'automatic',
+        },
+        { ...MONO_192K_SOURCE, sampleRate: 384_000 },
+      ),
+    ).toMatchObject({ reason: 'sample-rate', status: 'unsupported' });
+  });
+
+  it.each([
+    ['ogg', 'ogg-opus-128kbps', 96_000, 48_000],
+    ['mp3', 'mp3-320kbps', 24_000, 32_000],
+  ])(
+    'selects the closest valid exact rate for %s',
+    (formatId, presetId, sourceSampleRate, expectedSampleRate) => {
+      expect(
+        resolveAudioStreamSourceAwareFormatTarget(
+          { formatId, presetId, sampleRate: 'automatic' },
+          { ...MONO_192K_SOURCE, sampleRate: sourceSampleRate },
+        ),
+      ).toMatchObject({
+        probeTarget: { sampleRate: expectedSampleRate },
+        status: 'resolved',
+        target: { presetId, sampleRate: expectedSampleRate },
+      });
+    },
+  );
+
+  it('preserves a valid AAC source rate', () => {
+    const result = resolveAudioStreamSourceAwareFormatTarget(
+      {
+        formatId: 'aac',
+        presetId: 'aac-128kbps',
+        sampleRate: 'automatic',
+      },
+      { ...MONO_192K_SOURCE, sampleRate: 44_100 },
+    );
+
+    expect(result).toMatchObject({
+      probeTarget: { sampleRate: 44_100 },
+      status: 'resolved',
+      target: { presetId: 'aac-128kbps' },
+    });
+    expect(Object.keys(result.status === 'resolved' ? result.target : {})).toEqual([
+      'presetId',
+    ]);
+  });
+
+  it('prefers the higher exact rate when distances tie', () => {
+    expect(
+      resolveAudioStreamSourceAwareFormatTarget(
+        {
+          formatId: 'aac',
+          presetId: 'aac-128kbps',
+          sampleRate: 'automatic',
+        },
+        { ...MONO_192K_SOURCE, sampleRate: 46_050 },
+      ),
+    ).toMatchObject({
+      probeTarget: { sampleRate: 48_000 },
+      status: 'resolved',
+    });
+  });
+
+  it('validates source-owned channels before selecting a rate', () => {
+    expect(
+      resolveAudioStreamSourceAwareFormatTarget(
+        {
+          formatId: 'ogg',
+          presetId: 'ogg-opus-128kbps',
+          sampleRate: 'automatic',
+        },
+        { ...MONO_192K_SOURCE, channels: 3, sampleRate: 96_000 },
+      ),
+    ).toMatchObject({ reason: 'channels', status: 'unsupported' });
+  });
+
+  it('does not invent an automatic rate for a range-constrained preset', () => {
+    expect(
+      resolveAudioStreamSourceAwareFormatTarget(
+        {
+          formatId: 'wav',
+          presetId: 'wav-pcm24',
+          sampleRate: 'automatic',
+        },
+        { ...MONO_192K_SOURCE, sampleRate: 48_000 },
+        capabilitiesWithWavRateRange(96_000, 192_000),
+      ),
+    ).toMatchObject({ reason: 'sample-rate', status: 'unsupported' });
+  });
+});
+
+describe('source-aware sample-rate options', () => {
+  it('enumerates discrete source and preset rates with path-specific reasons', () => {
+    expect(
+      getAudioStreamOutputSampleRateOptions(
+        { formatId: 'ogg', presetId: 'ogg-opus-128kbps' },
+        { ...MONO_192K_SOURCE, sampleRate: 384_000 },
+      ),
+    ).toEqual({
+      options: [
+        {
+          path: 'pass-through',
+          reason: 'preset-sample-rate',
+          sampleRate: 384_000,
+          status: 'unsupported',
+        },
+        {
+          path: 'resampling',
+          reason: 'resampling-source-sample-rate',
+          sampleRate: 48_000,
+          status: 'unsupported',
+        },
+      ],
+      status: 'resolved',
+    });
+  });
+
+  it('does not invent range candidates and evaluates caller candidates', () => {
+    expect(
+      getAudioStreamOutputSampleRateOptions(
+        { formatId: 'wav', presetId: 'wav-pcm24' },
+        { ...MONO_192K_SOURCE, sampleRate: 48_000 },
+      ),
+    ).toEqual({
+      options: [
+        { path: 'pass-through', sampleRate: 48_000, status: 'supported' },
+      ],
+      status: 'resolved',
+    });
+
+    const result = getAudioStreamOutputSampleRateOptions(
+      {
+        candidateSampleRates: [96_000, 384_000, 7_999, 48_000.5],
+        formatId: 'wav',
+        presetId: 'wav-pcm24',
+      },
+      { ...MONO_192K_SOURCE, sampleRate: 48_000 },
+    );
+    expect(result).toEqual({
+      options: [
+        { path: 'pass-through', sampleRate: 48_000, status: 'supported' },
+        { path: 'resampling', sampleRate: 96_000, status: 'supported' },
+        {
+          path: 'resampling',
+          reason: 'resampling-target-sample-rate',
+          sampleRate: 384_000,
+          status: 'unsupported',
+        },
+        {
+          path: 'resampling',
+          reason: 'preset-sample-rate',
+          sampleRate: 7_999,
+          status: 'unsupported',
+        },
+        {
+          path: 'resampling',
+          reason: 'invalid-sample-rate',
+          sampleRate: 48_000.5,
+          status: 'unsupported',
+        },
+      ],
+      status: 'resolved',
+    });
+    expect(Object.isFrozen(result)).toBe(true);
+    if (result.status === 'resolved') {
+      expect(Object.isFrozen(result.options)).toBe(true);
+      expect(result.options.every(Object.isFrozen)).toBe(true);
+    }
+  });
+
+  it.each([
+    ['unknown format', { formatId: 'missing', presetId: 'wav-pcm24' }, MONO_192K_SOURCE, 'format'],
+    ['wrong preset', { formatId: 'wav', presetId: 'ogg-opus-128kbps' }, MONO_192K_SOURCE, 'preset'],
+    ['missing channels', { formatId: 'ogg', presetId: 'ogg-opus-128kbps' }, { ...MONO_192K_SOURCE, channels: null }, 'source-inspection'],
+    ['missing sample rate', { formatId: 'ogg', presetId: 'ogg-opus-128kbps' }, { ...MONO_192K_SOURCE, sampleRate: null }, 'source-inspection'],
+    ['invalid sample rate', { formatId: 'ogg', presetId: 'ogg-opus-128kbps' }, { ...MONO_192K_SOURCE, sampleRate: 48_000.5 }, 'source-inspection'],
+    ['unsupported channels', { formatId: 'ogg', presetId: 'ogg-opus-128kbps' }, { ...MONO_192K_SOURCE, channels: 3 }, 'channels'],
+  ] as const)(
+    'returns a structured error for %s',
+    (_case, selection, inspection, reason) => {
+      const result = getAudioStreamOutputSampleRateOptions(
+        selection,
+        inspection,
+      );
+      expect(result).toMatchObject({ reason, status: 'unsupported' });
+      expect(Object.isFrozen(result)).toBe(true);
+    },
+  );
+
+  it('rejects channels outside the global source limit', () => {
+    expect(
+      getAudioStreamOutputSampleRateOptions(
+        { formatId: 'wav', presetId: 'wav-pcm24' },
+        { ...MONO_192K_SOURCE, channels: 33, sampleRate: 48_000 },
+      ),
+    ).toMatchObject({ reason: 'channels', status: 'unsupported' });
+  });
+
+  it('reports a source outside a custom pass-through path', () => {
+    const result = getAudioStreamOutputSampleRateOptions(
+      { formatId: 'aac', presetId: 'aac-128kbps' },
+      { ...MONO_192K_SOURCE, sampleRate: 44_100 },
+      capabilitiesWithPassThroughMaximum(32_000),
+    );
+    expect(result.status).toBe('resolved');
+    if (result.status === 'resolved') {
+      expect(result.options[0]).toEqual({
+        path: 'pass-through',
+        reason: 'pass-through-sample-rate',
+        sampleRate: 44_100,
+        status: 'unsupported',
+      });
+    }
+  });
+});
+
+function capabilitiesWithWavRateRange(
+  minimum: number,
+  maximum: number,
+): AudioTranscoderStreamCapabilities {
+  const format = AUDIO_TRANSCODER_STREAM_CAPABILITIES.outputFormats.find(
+    ({ id }) => id === 'wav',
+  )!;
+  const preset = format.presets.find(
+    ({ preset: candidate }) => candidate.id === 'wav-pcm24',
+  )!;
+  return Object.freeze({
+    ...AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+    outputFormats: Object.freeze([
+      Object.freeze({
+        ...format,
+        presets: Object.freeze([
+          Object.freeze({
+            ...preset,
+            target: Object.freeze({
+              ...preset.target,
+              sampleRate: Object.freeze({ kind: 'range' as const, maximum, minimum }),
+            }),
+          }),
+        ]),
+      }),
+    ]),
+  });
+}
+
+function capabilitiesWithPassThroughMaximum(
+  maximum: number,
+): AudioTranscoderStreamCapabilities {
+  const sampleRate = AUDIO_TRANSCODER_STREAM_CAPABILITIES.limits.sampleRate;
+  return Object.freeze({
+    ...AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+    limits: Object.freeze({
+      ...AUDIO_TRANSCODER_STREAM_CAPABILITIES.limits,
+      sampleRate: Object.freeze({
+        ...sampleRate,
+        passThrough: Object.freeze({ ...sampleRate.passThrough, maximum }),
+      }),
+    }),
+  });
+}

@@ -118,6 +118,8 @@ export interface AudioStreamLosslessOutputPresetDescriptor
 export interface AudioStreamLossyOutputPresetDescriptor
   extends AudioStreamOutputPresetDescriptorBase {
   readonly bitrate: number;
+  /** Codec rate-control mode used by this exact preset. */
+  readonly bitrateMode: 'constant' | 'variable';
   readonly kind: 'lossy';
   readonly preset: AudioOutputPreset & {
     readonly bitDepth: null;
@@ -555,6 +557,7 @@ function lossyOutputPreset<
   const Descriptor extends StreamLossyOutputPresetDescriptor,
 >(descriptor: Descriptor): Readonly<{
   readonly bitrate: Descriptor['bitrate'];
+  readonly bitrateMode: Descriptor['bitrateMode'];
   readonly codec: Descriptor['codec'];
   readonly kind: 'lossy';
   readonly preset: Descriptor['preset'];
@@ -562,6 +565,7 @@ function lossyOutputPreset<
 }> {
   return Object.freeze({
     bitrate: descriptor.bitrate,
+    bitrateMode: descriptor.bitrateMode,
     codec: descriptor.codec,
     kind: 'lossy' as const,
     preset: descriptor.preset,

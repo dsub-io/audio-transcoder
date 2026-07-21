@@ -80,6 +80,7 @@ describe('stream output presets', () => {
     expect(MP3_OUTPUT_PRESET_DESCRIPTORS).toEqual(
       [128_000, 192_000, 256_000, 320_000].map((bitrate, index) => ({
         bitrate,
+        bitrateMode: 'constant',
         codec: 'mp3',
         constraints:
           index === 0
@@ -110,6 +111,7 @@ describe('stream output presets', () => {
     expect(AAC_OUTPUT_PRESET_DESCRIPTORS).toEqual(
       [96_000, 128_000, 192_000, 256_000].map((bitrate) => ({
         bitrate,
+        bitrateMode: 'variable',
         codec: 'aac',
         constraints: AAC_OUTPUT_CODEC_CONSTRAINTS,
         encoding: { bitrate, bitrateMode: 'variable', codec: 'aac' },
@@ -137,6 +139,7 @@ describe('stream output presets', () => {
     expect(OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS).toEqual(
       [64_000, 96_000, 128_000, 192_000].map((bitrate) => ({
         bitrate,
+        bitrateMode: 'variable',
         codec: 'opus',
         constraints: OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS,
         encoding: null,

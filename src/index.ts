@@ -15,10 +15,13 @@ export { createAudioTranscoderStreamWorkerEngine } from './stream/client.js';
 export { createAudioTranscoderStreamWorkerPool } from './stream/pool.js';
 export { AUDIO_TRANSCODER_STREAM_CAPABILITIES } from './stream/capabilities.js';
 export {
+  AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE,
   AUDIO_STREAM_SOURCE_SAMPLE_RATE,
   getAudioStreamOutputEncodingOptions,
   getAudioStreamOutputParameters,
+  getAudioStreamOutputSampleRateOptions,
   resolveAudioStreamFormatTarget,
+  resolveAudioStreamSourceAwareFormatTarget,
 } from './stream/format-target.js';
 export {
   AUDIO_TRANSCODER_OUTPUT_MEMORY_LIMIT_BYTES,
@@ -199,8 +202,20 @@ export type {
   AudioStreamOutputParameterOption,
   AudioStreamOutputParameterSelection,
   AudioStreamOutputParameterValue,
+  AudioStreamOutputSampleRateOption,
+  AudioStreamOutputSampleRateOptionsError,
+  AudioStreamOutputSampleRateOptionsErrorReason,
+  AudioStreamOutputSampleRateOptionsResult,
+  AudioStreamOutputSampleRateOptionsSelection,
+  AudioStreamOutputSampleRatePath,
+  AudioStreamOutputSampleRateUnsupportedReason,
   AudioStreamResolvedFormatTarget,
+  AudioStreamResolvedOutputSampleRateOptions,
   AudioStreamSampleRateSelection,
+  AudioStreamSourceAwareFormatTargetSelection,
+  AudioStreamSourceAwareSampleRateSelection,
+  AudioStreamSupportedOutputSampleRateOption,
+  AudioStreamUnsupportedOutputSampleRateOption,
 } from './stream/format-target.js';
 export type {
   AudioTranscoderOutputArtifact,
