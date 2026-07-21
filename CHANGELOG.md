@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.1.0](https://github.com/dsub-io/audio-transcoder/compare/v0.0.3...v0.1.0) (2026-07-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* default stream workers now require codecAssets, and runtime output descriptors use runtime-asset instead of bundled-wasm.
+
+### Features
+
+* add source-aware browser codec outputs ([#11](https://github.com/dsub-io/audio-transcoder/issues/11)) ([9134b25](https://github.com/dsub-io/audio-transcoder/commit/9134b25dd7b93c31d598ed0e6cc7b866dced040a))
+
 ## [0.0.3](https://github.com/dsub-io/audio-transcoder/compare/v0.0.2...v0.0.3) (2026-07-20)
 
 
