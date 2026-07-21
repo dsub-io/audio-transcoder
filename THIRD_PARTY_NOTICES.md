@@ -79,7 +79,7 @@ source form with its modifications identified.
 - Official source archive: [ffmpeg-8.1.2.tar.xz](https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz)
 - Archive SHA-256: `464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c`
 - Generated thin JavaScript glue SHA-256:
-  `4af4035a226a9adbc94d6f2f59eda479394b8d8d4abf61b851c30bd55b24f171`
+  `e1e8467b25fa8401580617ed359067b07c8ceaf5ae662112265040cdba686283`
 - Raw `aac.wasm` SHA-256:
   `90c75819c422afbbb2feb0ba8e9e4ec94a004d800799cfa083182359e5497efc`
 - Raw `aac.wasm` size: `511450` bytes

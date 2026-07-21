@@ -5,7 +5,7 @@ readonly FFMPEG_VERSION='8.1.2'
 readonly FFMPEG_ARCHIVE_SHA256='464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c'
 readonly EMSDK_IMAGE='emscripten/emsdk@sha256:19b3a361d84262c1cd133a29fb84368678bab32aee47e074fcd83a216566330c'
 readonly SOURCE_EPOCH='1781664417'
-readonly EXPECTED_GLUE_SHA256='4af4035a226a9adbc94d6f2f59eda479394b8d8d4abf61b851c30bd55b24f171'
+readonly EXPECTED_GLUE_SHA256='e1e8467b25fa8401580617ed359067b07c8ceaf5ae662112265040cdba686283'
 readonly EXPECTED_WASM_SHA256='90c75819c422afbbb2feb0ba8e9e4ec94a004d800799cfa083182359e5497efc'
 
 SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -215,6 +215,9 @@ docker run --rm \
       -Oz \
       -o /work/out/aac.generated.mjs
   '
+
+node "${SCRIPT_DIRECTORY}/patch-generated-glue.mjs" \
+  "${BUILD_ROOT}/out/aac.generated.mjs"
 
 actual_glue_sha="$(sha256_file "${BUILD_ROOT}/out/aac.generated.mjs")"
 actual_wasm_sha="$(sha256_file "${BUILD_ROOT}/out/aac.generated.wasm")"
