@@ -3,6 +3,7 @@ import type {
   AudioInput,
   AudioInspection,
   AudioOutputPreset,
+  AudioSourceEncoding,
   DecodedAudio,
   EncodedAudio,
   PcmAudio,
@@ -110,6 +111,7 @@ export const aiffInspector: AudioInspectorAdapter = Object.freeze({
               ? ['AIFF SSND chunk was not found.']
               : [],
       sampleRate: common?.sampleRate ?? null,
+      sourceEncoding: getAiffSourceEncoding(common),
     };
   },
 });
@@ -235,6 +237,71 @@ function isAiff(view: DataView): boolean {
     readAscii(view, 0, 4) === 'FORM' &&
     (formType === 'AIFF' || formType === 'AIFC')
   );
+}
+
+function getAiffSourceEncoding(
+  common: AiffCommon | null,
+): AudioSourceEncoding {
+  if (common === null || common.compression === null) {
+    return Object.freeze({ kind: 'unknown' });
+  }
+
+  switch (common.compression) {
+    case 'NONE':
+    case 'twos':
+      return createAiffPcmEncoding(common.bitDepth, 'integer', 'big', 'signed');
+    case 'sowt':
+      return createAiffPcmEncoding(common.bitDepth, 'integer', 'little', 'signed');
+    case 'raw ':
+      return createAiffPcmEncoding(
+        common.bitDepth,
+        'integer',
+        'not-applicable',
+        'unsigned',
+      );
+    case 'fl32':
+    case 'FL32':
+    case 'fl64':
+    case 'FL64':
+      return createAiffPcmEncoding(
+        common.bitDepth,
+        'float',
+        common.bitDepth <= 8 ? 'not-applicable' : 'big',
+        'not-applicable',
+      );
+    case 'ALAC':
+    case 'alac':
+      return Object.freeze({
+        bitDepth: null,
+        codec: 'alac',
+        kind: 'lossless-compressed',
+      });
+    case 'alaw':
+    case 'ima4':
+    case 'ulaw':
+      return Object.freeze({
+        estimatedBitrateBps: null,
+        codec: common.compression.trim().toLowerCase(),
+        kind: 'lossy-compressed',
+      });
+    default:
+      return Object.freeze({ kind: 'unknown' });
+  }
+}
+
+function createAiffPcmEncoding(
+  bitDepth: number,
+  sampleFormat: 'float' | 'integer',
+  endianness: Extract<AudioSourceEncoding, { readonly kind: 'pcm' }>['endianness'],
+  signedness: Extract<AudioSourceEncoding, { readonly kind: 'pcm' }>['signedness'],
+): AudioSourceEncoding {
+  return Object.freeze({
+    bitDepth: bitDepth > 0 ? bitDepth : null,
+    endianness,
+    kind: 'pcm',
+    sampleFormat,
+    signedness,
+  });
 }
 
 function parseAiff(view: DataView): ParsedAiff {

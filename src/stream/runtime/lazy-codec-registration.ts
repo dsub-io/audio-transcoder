@@ -1,37 +1,35 @@
 import { AudioTranscoderError } from '../../errors.js';
 import type { BundledWasmOutputCodec } from '../../codecs/stream-output-presets.js';
 
+export type MediaBunnyBundledWasmOutputCodec = Exclude<
+  BundledWasmOutputCodec,
+  'ogg-opus'
+>;
+
 export type MediaBunnyCodecRegistrationLoader = () => Promise<() => void>;
 
 export type MediaBunnyCodecRegistrationLoaders = Readonly<
-  Record<BundledWasmOutputCodec, MediaBunnyCodecRegistrationLoader>
+  Record<MediaBunnyBundledWasmOutputCodec, MediaBunnyCodecRegistrationLoader>
 >;
 
 export type EnsureMediaBunnyCodecRegistered = (
-  codec: BundledWasmOutputCodec,
+  codec: MediaBunnyBundledWasmOutputCodec,
 ) => Promise<void>;
 
-export const MEDIABUNNY_CODEC_REGISTRATION_LOADERS: MediaBunnyCodecRegistrationLoaders =
-  Object.freeze({
-    async flac() {
-      const extension = await import('@mediabunny/flac-encoder');
-      return extension.registerFlacEncoder;
-    },
-    async mp3() {
-      const extension = await import('@mediabunny/mp3-encoder');
-      return extension.registerMp3Encoder;
-    },
-  });
-
 /**
- * Creates a Worker-local, concurrency-safe extension registrar. Rejections stay
- * cached because MediaBunny's global encoder registry cannot be rolled back.
+ * Creates a Worker-local, concurrency-safe extension registrar. Successful
+ * registrations stay cached. A failed lazy module load may be retried by a
+ * later output probe. Each runtime-asset registrar changes its global guard only
+ * after registration succeeds, so synchronous registration failures are also
+ * safe to retry.
  */
 export function createLazyMediaBunnyCodecRegistrar(
-  loaders: MediaBunnyCodecRegistrationLoaders =
-    MEDIABUNNY_CODEC_REGISTRATION_LOADERS,
+  loaders: MediaBunnyCodecRegistrationLoaders,
 ): EnsureMediaBunnyCodecRegistered {
-  const registrations = new Map<BundledWasmOutputCodec, Promise<void>>();
+  const registrations = new Map<
+    MediaBunnyBundledWasmOutputCodec,
+    Promise<void>
+  >();
 
   return (codec): Promise<void> => {
     const existing = registrations.get(codec);
@@ -41,18 +39,28 @@ export function createLazyMediaBunnyCodecRegistrar(
 
     const initialization = Promise.resolve()
       .then(loaders[codec])
-      .then((register) => register())
+      .then(
+        async (register) => {
+          try {
+            await register();
+          } catch (error) {
+            registrations.delete(codec);
+            throw error;
+          }
+        },
+        (error: unknown) => {
+          registrations.delete(codec);
+          throw error;
+        },
+      )
       .catch((error: unknown) => {
         const reason = error instanceof Error ? error.message : String(error);
         throw new AudioTranscoderError(
           'WORKER_FAILURE',
-          `Failed to initialize the bundled ${codec.toUpperCase()} encoder: ${reason}`,
+          `Failed to initialize the runtime-asset ${codec.toUpperCase()} encoder: ${reason}`,
         );
       });
     registrations.set(codec, initialization);
     return initialization;
   };
 }
-
-export const ensureMediaBunnyCodecRegistered =
-  createLazyMediaBunnyCodecRegistrar();

@@ -30,7 +30,7 @@ describe('streaming custom PCM Blob parser', () => {
     const payload = new Uint8Array(values.length * 2);
     const payloadView = new DataView(payload.buffer);
     values.forEach((value, index) => payloadView.setInt16(index * 2, value, false));
-    const blob = new TrackingBlob([createCaf({ flags: 6, payload })]);
+    const blob = new TrackingBlob([createCaf({ flags: 0, payload })]);
 
     const inspection = await inspectCustomPcmBlob({ blob });
     const source = await openCustomPcmBlobSource(
@@ -51,6 +51,13 @@ describe('streaming custom PCM Blob parser', () => {
       decodeSupport: 'built-in',
       sampleRate: 48_000,
       size: blob.size,
+      sourceEncoding: {
+        bitDepth: 16,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
     });
     expect(Object.isFrozen(inspection)).toBe(true);
     expect(source).toMatchObject({
@@ -81,7 +88,7 @@ describe('streaming custom PCM Blob parser', () => {
         createCaf({
           bitDepth: 64,
           channels: 3,
-          flags: 3,
+          flags: 1,
           payload: float64Bytes(values, false),
         }),
       ]);
@@ -125,7 +132,7 @@ describe('streaming custom PCM Blob parser', () => {
           createCaf({
             bitDepth: 64,
             channels: 3,
-            flags: 3,
+            flags: 1,
             payload: float64Bytes([0, 0, 0], false),
           }),
         ]),
@@ -162,17 +169,28 @@ describe('streaming custom PCM Blob parser', () => {
   );
 
   it.each([
-    [1, 32, 0.25, true, 'float'],
-    [0, 8, -1, false, 'unsigned integer'],
+    [0, 16, 0.5, false, 'signed integer BE', 'big', 'integer', 'signed'],
+    [2, 16, -0.5, true, 'signed integer LE', 'little', 'integer', 'signed'],
+    [1, 32, 0.25, false, 'float BE', 'big', 'float', 'not-applicable'],
+    [3, 32, -0.75, true, 'float LE', 'little', 'float', 'not-applicable'],
   ] as const)(
-    'decodes CAF flags %#',
-    async (flags, bitDepth, expected, littleEndian, label) => {
+    'decodes canonical CAF LPCM flags %#',
+    async (
+      flags,
+      bitDepth,
+      expected,
+      littleEndian,
+      label,
+      endianness,
+      sampleFormat,
+      signedness,
+    ) => {
       const payload = new Uint8Array(bitDepth / 8);
       const view = new DataView(payload.buffer);
       if (bitDepth === 32) {
         view.setFloat32(0, expected, littleEndian);
       } else {
-        view.setUint8(0, 0);
+        view.setInt16(0, expected * 32_768, littleEndian);
       }
       const input = {
         blob: new Blob([createCaf({ bitDepth, flags, payload })]),
@@ -187,6 +205,13 @@ describe('streaming custom PCM Blob parser', () => {
       const [chunk] = await collect(source!.chunks());
 
       expect(inspection?.codec).toContain(label);
+      expect(inspection?.sourceEncoding).toMatchObject({
+        bitDepth,
+        endianness,
+        kind: 'pcm',
+        sampleFormat,
+        signedness,
+      });
       expect(chunk?.[0]).toBe(expected);
     },
   );
@@ -208,10 +233,15 @@ describe('streaming custom PCM Blob parser', () => {
     await expect(inspectCustomPcmBlob(input)).resolves.toMatchObject({
       bitDepth: null,
       channels: 2,
-      codec: expect.stringContaining('aac '),
+      codec: 'aac',
       decodeSupport: 'browser-dependent',
       durationSeconds: null,
       notes: ['CAF format "aac " is not LPCM.'],
+      sourceEncoding: {
+        estimatedBitrateBps: null,
+        codec: 'aac',
+        kind: 'lossy-compressed',
+      },
     });
     await expect(openCustomPcmBlobSource(
       input,
@@ -222,12 +252,93 @@ describe('streaming custom PCM Blob parser', () => {
     });
   });
 
+  it('normalizes the streaming CAF MP3 FourCC to the canonical codec ID', async () => {
+    const input = {
+      blob: new Blob([
+        createCaf({
+          bitDepth: 0,
+          bytesPerPacket: 0,
+          channels: 2,
+          formatId: '.mp3',
+          framesPerPacket: 1_152,
+          payload: new Uint8Array([1, 2]),
+        }),
+      ]),
+    };
+
+    await expect(inspectCustomPcmBlob(input)).resolves.toMatchObject({
+      sourceEncoding: {
+        codec: 'mp3',
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      },
+    });
+  });
+
   it.each([
-    ['layout flag', { flags: 4 | 32 }],
+    [
+      'alac',
+      1,
+      { bitDepth: 16, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    [
+      'alac',
+      2,
+      { bitDepth: 20, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    [
+      'alac',
+      3,
+      { bitDepth: 24, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    [
+      'alac',
+      4,
+      { bitDepth: 32, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    [
+      'alac',
+      99,
+      { bitDepth: null, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    ['flac', 0, { bitDepth: null, codec: 'flac', kind: 'lossless-compressed' }],
+    ['flac', 1, { bitDepth: 16, codec: 'flac', kind: 'lossless-compressed' }],
+    ['flac', 3, { bitDepth: 24, codec: 'flac', kind: 'lossless-compressed' }],
+    [
+      'opus',
+      0,
+      {
+        codec: 'opus',
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      },
+    ],
+    ['zzzz', 0, { kind: 'unknown' }],
+  ] as const)('classifies streaming CAF codec %s', async (formatId, flags, sourceEncoding) => {
+    const input = {
+      blob: new Blob([
+        createCaf({
+          bitDepth: 0,
+          bytesPerPacket: 0,
+          channels: 2,
+          flags,
+          formatId,
+          framesPerPacket: 1_024,
+          payload: new Uint8Array([1, 2]),
+        }),
+      ]),
+    };
+
+    await expect(inspectCustomPcmBlob(input)).resolves.toMatchObject({
+      sourceEncoding,
+    });
+  });
+
+  it.each([
+    ['unknown flag bits', { flags: 4 }],
     ['padded frames', { bytesPerPacket: 4 }],
     ['float representation', { bitDepth: 16, flags: 1 }],
-    ['integer representation', { bitDepth: 64, flags: 4 }],
-    ['unsigned representation', { bitDepth: 16, flags: 0 }],
+    ['integer representation', { bitDepth: 64, flags: 0 }],
   ] as const)('reports unsupported CAF %s', async (_label, options) => {
     const input = {
       blob: new Blob([
@@ -252,6 +363,7 @@ describe('streaming custom PCM Blob parser', () => {
       blob: new Blob([
         createCaf({
           dataChunkSize: -1n,
+          flags: 2,
           prefixChunks: [cafChunk('free', new Uint8Array([1, 2, 3]))],
           payload: int16Bytes([0, 16_384], true),
         }),
@@ -328,6 +440,13 @@ describe('streaming custom PCM Blob parser', () => {
       codec: 'PCM signed integer BE',
       container: 'AIFF',
       decodeSupport: 'built-in',
+      sourceEncoding: {
+        bitDepth: 16,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
     });
     expect(source?.totalFrames).toBe(1);
     expect([...chunk!]).toEqual([0.5]);
@@ -354,6 +473,11 @@ describe('streaming custom PCM Blob parser', () => {
       codec: 'Compression ulaw',
       decodeSupport: 'browser-dependent',
       notes: ['AIFC compression "ulaw" is unsupported.'],
+      sourceEncoding: {
+        estimatedBitrateBps: null,
+        codec: 'ulaw',
+        kind: 'lossy-compressed',
+      },
     });
     await expect(openCustomPcmBlobSource(
       compressed,
@@ -363,6 +487,133 @@ describe('streaming custom PCM Blob parser', () => {
       code: 'UNSUPPORTED_INPUT',
     });
   });
+
+  it.each([
+    [
+      'twos',
+      16,
+      {
+        bitDepth: 16,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
+    ],
+    [
+      'sowt',
+      16,
+      {
+        bitDepth: 16,
+        endianness: 'little',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
+    ],
+    [
+      'raw ',
+      8,
+      {
+        bitDepth: 8,
+        endianness: 'not-applicable',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'unsigned',
+      },
+    ],
+    [
+      'fl32',
+      32,
+      {
+        bitDepth: 32,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'FL32',
+      8,
+      {
+        bitDepth: 8,
+        endianness: 'not-applicable',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'fl64',
+      64,
+      {
+        bitDepth: 64,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'FL64',
+      32,
+      {
+        bitDepth: 32,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'ALAC',
+      16,
+      { bitDepth: null, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    [
+      'alac',
+      24,
+      { bitDepth: null, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    [
+      'alaw',
+      16,
+      {
+        codec: 'alaw',
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      },
+    ],
+    [
+      'ima4',
+      16,
+      {
+        codec: 'ima4',
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      },
+    ],
+    ['zzzz', 16, { kind: 'unknown' }],
+  ] as const)(
+    'classifies streaming AIFC compression %s',
+    async (compression, bitDepth, sourceEncoding) => {
+      const input = {
+        blob: new Blob([
+          createAiff({
+            bitDepth,
+            compression,
+            formType: 'AIFC',
+            payload: new Uint8Array(bitDepth / 8),
+          }),
+        ]),
+      };
+
+      await expect(inspectCustomPcmBlob(input)).resolves.toMatchObject({
+        sourceEncoding,
+      });
+    },
+  );
 
   it.each([
     ['small COMM', { commonChunkSize: 17 }],
@@ -390,7 +641,7 @@ describe('streaming custom PCM Blob parser', () => {
   });
 
   it('maps cancellation before and during bounded reads', async () => {
-    const bytes = createCaf({ payload: int16Bytes([0], true) });
+    const bytes = createCaf({ flags: 2, payload: int16Bytes([0], true) });
     const before = new AbortController();
     before.abort('before read');
     await expect(
@@ -458,7 +709,7 @@ function createCaf(options: CafOptions = {}): ArrayBuffer {
   const descriptionView = new DataView(description.buffer);
   descriptionView.setFloat64(0, options.sampleRate ?? 48_000, false);
   writeAscii(descriptionView, 8, options.formatId ?? 'lpcm');
-  descriptionView.setUint32(12, options.flags ?? 4, false);
+  descriptionView.setUint32(12, options.flags ?? 0, false);
   descriptionView.setUint32(16, bytesPerPacket, false);
   descriptionView.setUint32(20, framesPerPacket, false);
   descriptionView.setUint32(24, channels, false);

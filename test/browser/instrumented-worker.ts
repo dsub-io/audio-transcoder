@@ -1,8 +1,5 @@
-import {
-  createAudioTranscoderStreamEngine,
-  exposeAudioTranscoderStreamWorker,
-  type AudioTranscoderStreamWorkerScope,
-} from '@dsub/audio-transcoder';
+import type { AudioTranscoderStreamWorkerScope } from '@dsub/audio-transcoder';
+import { exposeDefaultAudioTranscoderStreamWorker } from '../../src/stream/default-worker-host.js';
 
 interface ResourceEntriesRequest {
   readonly token: string;
@@ -34,7 +31,7 @@ const scope: AudioTranscoderStreamWorkerScope = {
   },
 };
 
-exposeAudioTranscoderStreamWorker(createAudioTranscoderStreamEngine(), scope);
+exposeDefaultAudioTranscoderStreamWorker(scope);
 
 function isResourceEntriesRequest(
   value: unknown,

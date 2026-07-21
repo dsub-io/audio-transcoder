@@ -1,6 +1,7 @@
 import {
   AUDIO_TRANSCODER_STREAM_CAPABILITIES,
   createAudioTranscoderOutputSession,
+  createSelfHostedRuntimeAssetSource,
   createAudioTranscoderStreamWorkerPool,
   createAudioTranscoderStreamWorkerEngine,
   type AudioStreamInput,
@@ -17,6 +18,11 @@ const SAMPLE_RATE = 44_100;
 const CHANNELS = 2;
 const CHUNK_BYTES = 64 * 1024;
 const INPUT_PROBE_DEADLINE_MS = 15_000;
+const BROWSER_CODEC_ASSETS = Object.freeze({
+  source: createSelfHostedRuntimeAssetSource(
+    new URL('/.artifacts/codec-assets-package/', window.location.href).href,
+  ),
+});
 const MP3_ACCEPTED_MATRIX = [
   [
     'mp3-128kbps',
@@ -40,10 +46,28 @@ const MP3_HIGH_BITRATE_PRESETS = [
   'mp3-320kbps',
 ] as const;
 const MP3_128KBPS_REJECTED_SAMPLE_RATES = [8_000, 11_025, 12_000] as const;
+const AAC_PRESETS = [
+  'aac-96kbps',
+  'aac-128kbps',
+  'aac-192kbps',
+  'aac-256kbps',
+] as const;
+const AAC_SAMPLE_RATES = [32_000, 44_100, 48_000] as const;
+const OGG_OPUS_PRESETS = [
+  'ogg-opus-64kbps',
+  'ogg-opus-96kbps',
+  'ogg-opus-128kbps',
+  'ogg-opus-192kbps',
+] as const;
 
-type OutputFormat = 'flac' | 'mp3' | 'wav';
+type OutputFormat = 'aac' | 'aiff' | 'flac' | 'mp3' | 'ogg' | 'wav';
 
 interface BrowserMatrixResult {
+  readonly aacFrames: number | null;
+  readonly aacObjectType: number | null;
+  readonly aiffFormBytes: number | null;
+  readonly aiffFrames: number | null;
+  readonly aiffSoundBytes: number | null;
   readonly bitDepth: number | null;
   readonly bitrate: number | null;
   readonly bytesWritten: number;
@@ -60,6 +84,11 @@ interface BrowserMatrixResult {
   readonly mp3FrameBitrates: readonly number[] | null;
   readonly mp3SeekHeader: 'Info' | 'Xing' | null;
   readonly mp3SeekHeaderFrames: number | null;
+  readonly oggEos: boolean | null;
+  readonly oggFinalGranule: number | null;
+  readonly oggPages: number | null;
+  readonly oggPreSkip: number | null;
+  readonly oggSerial: number | null;
   readonly presetId: AudioStreamOutputPresetId;
   readonly progress: readonly number[];
   readonly resultDetailsFormat: OutputFormat;
@@ -100,6 +129,23 @@ interface BrowserWavMatrixResult {
   readonly invalid: readonly BrowserConstraintRejection[];
 }
 
+interface BrowserAiffMatrixResult {
+  readonly accepted: readonly BrowserMatrixResult[];
+  readonly invalid: readonly BrowserConstraintRejection[];
+}
+
+interface BrowserAacMatrixResult {
+  readonly accepted: readonly BrowserMatrixResult[];
+  readonly invalid: readonly BrowserConstraintRejection[];
+  readonly resourcesBeforeAcceptedEncoding: readonly string[];
+}
+
+interface BrowserOggOpusMatrixResult {
+  readonly accepted: readonly BrowserMatrixResult[];
+  readonly invalid: readonly BrowserConstraintRejection[];
+  readonly resourcesBeforeAcceptedEncoding: readonly string[];
+}
+
 interface BrowserFlacProbeBudgetResult {
   readonly adequateErrorCode: string | null;
   readonly adequateStatus: string | null;
@@ -120,14 +166,24 @@ interface BrowserFlacProbeBudgetResult {
 }
 
 interface BrowserOutputSupportProbeResult {
+  readonly aac: { readonly code: string; readonly status: string };
+  readonly aiff: { readonly code: string; readonly status: string };
   readonly disposed: boolean;
   readonly flac: { readonly code: string; readonly status: string };
   readonly invalidMp3: { readonly code: string; readonly status: string };
+  readonly invalidAac: { readonly code: string; readonly status: string };
+  readonly invalidOgg: { readonly code: string; readonly status: string };
   readonly mp3: { readonly code: string; readonly status: string };
+  readonly ogg: { readonly code: string; readonly status: string };
   readonly outputArtifactsCreated: number;
   readonly resourcesAfterFlac: readonly string[];
+  readonly resourcesAfterAiff: readonly string[];
+  readonly resourcesAfterAac: readonly string[];
   readonly resourcesAfterInvalidMp3: readonly string[];
+  readonly resourcesAfterInvalidAac: readonly string[];
+  readonly resourcesAfterInvalidOgg: readonly string[];
   readonly resourcesAfterMp3: readonly string[];
+  readonly resourcesAfterOgg: readonly string[];
   readonly resourcesAfterWav: readonly string[];
   readonly wav: { readonly code: string; readonly status: string };
 }
@@ -200,12 +256,15 @@ interface OpfsAbortSmokeResult {
 
 declare global {
   interface Window {
+    runAacConstraintMatrix(): Promise<BrowserAacMatrixResult>;
+    runAiffConstraintMatrix(): Promise<BrowserAiffMatrixResult>;
     runAudioStreamMatrix(): Promise<readonly BrowserMatrixResult[]>;
     runBoundedStreamStress(): Promise<BrowserStressResult>;
     runFlacConstraintMatrix(): Promise<BrowserFlacMatrixResult>;
     runFlacProbeBudgetRegression(): Promise<BrowserFlacProbeBudgetResult>;
     runInputProbeMatrix(): Promise<InputProbeMatrixResult>;
     runMp3ConstraintMatrix(): Promise<BrowserMp3ConstraintMatrixResult>;
+    runOggOpusConstraintMatrix(): Promise<BrowserOggOpusMatrixResult>;
     runOpfsAbortSmoke(): Promise<OpfsAbortSmokeResult>;
     runOutputSupportProbe(): Promise<BrowserOutputSupportProbeResult>;
     runOutputSessionSmoke(): Promise<OutputSessionSmokeResult>;
@@ -217,12 +276,20 @@ declare global {
 }
 
 window.runAudioStreamMatrix = async () => {
-  const engine = createAudioTranscoderStreamWorkerEngine();
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+  });
   const results: BrowserMatrixResult[] = [];
 
   try {
     for (const preset of AUDIO_TRANSCODER_STREAM_CAPABILITIES.outputPresets) {
-      results.push(await transcodePreset(engine, preset.id));
+      results.push(
+        await transcodePreset(
+          engine,
+          preset.id,
+          preset.id.startsWith('ogg-opus-') ? 48_000 : SAMPLE_RATE,
+        ),
+      );
     }
   } finally {
     await engine.dispose();
@@ -234,6 +301,7 @@ window.runAudioStreamMatrix = async () => {
 window.runFlacConstraintMatrix = async () => {
   let worker: Worker | undefined;
   const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
     workerFactory: () => {
       worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
         type: 'module',
@@ -290,7 +358,9 @@ window.runFlacConstraintMatrix = async () => {
 };
 
 window.runWavConstraintMatrix = async () => {
-  const engine = createAudioTranscoderStreamWorkerEngine();
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+  });
   try {
     const invalid: BrowserConstraintRejection[] = [];
     const invalidTargets = [
@@ -330,8 +400,129 @@ window.runWavConstraintMatrix = async () => {
   }
 };
 
+window.runAiffConstraintMatrix = async () => {
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+  });
+  try {
+    const invalid: BrowserConstraintRejection[] = [];
+    const invalidTargets = [
+      { channels: 1, sampleRate: 7_999 },
+      { channels: 1, sampleRate: 384_001 },
+      { channels: 0, sampleRate: 8_000 },
+      { channels: 33, sampleRate: 8_000 },
+    ] as const;
+    for (const presetId of ['aiff-pcm16', 'aiff-pcm24'] as const) {
+      for (const target of invalidTargets) {
+        invalid.push(await rejectTarget(engine, presetId, target));
+      }
+    }
+    const accepted: BrowserMatrixResult[] = [];
+    for (const presetId of ['aiff-pcm16', 'aiff-pcm24'] as const) {
+      for (const sampleRate of [8_000, 384_000] as const) {
+        for (const channels of [1, 32] as const) {
+          accepted.push(
+            await transcodePreset(engine, presetId, sampleRate, channels, 1_024),
+          );
+        }
+      }
+    }
+    return { accepted, invalid };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runAacConstraintMatrix = async () => {
+  let worker: Worker | undefined;
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+    workerFactory: () => {
+      worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      return worker;
+    },
+  });
+  try {
+    const invalid: BrowserConstraintRejection[] = [];
+    const invalidTargets = [
+      { channels: 1, sampleRate: 31_999 },
+      { channels: 1, sampleRate: 48_001 },
+      { channels: 1, sampleRate: 24_000 },
+      { channels: 1, sampleRate: 40_000 },
+      { channels: 0, sampleRate: 32_000 },
+      { channels: 3, sampleRate: 32_000 },
+    ] as const;
+    for (const presetId of AAC_PRESETS) {
+      for (const target of invalidTargets) {
+        invalid.push(await rejectTarget(engine, presetId, target));
+      }
+    }
+    const resourcesBeforeAcceptedEncoding = await readWorkerResourceEntries(
+      worker!,
+    );
+    const accepted: BrowserMatrixResult[] = [];
+    for (const presetId of AAC_PRESETS) {
+      for (const sampleRate of AAC_SAMPLE_RATES) {
+        for (const channels of [1, 2] as const) {
+          accepted.push(
+            await transcodePreset(engine, presetId, sampleRate, channels, 2_057),
+          );
+        }
+      }
+    }
+    return { accepted, invalid, resourcesBeforeAcceptedEncoding };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runOggOpusConstraintMatrix = async () => {
+  let worker: Worker | undefined;
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+    workerFactory: () => {
+      worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
+        type: 'module',
+      });
+      return worker;
+    },
+  });
+  try {
+    const invalid: BrowserConstraintRejection[] = [];
+    const invalidTargets = [
+      { channels: 1, sampleRate: 47_999 },
+      { channels: 1, sampleRate: 48_001 },
+      { channels: 1, sampleRate: 44_100 },
+      { channels: 0, sampleRate: 48_000 },
+      { channels: 3, sampleRate: 48_000 },
+    ] as const;
+    for (const presetId of OGG_OPUS_PRESETS) {
+      for (const target of invalidTargets) {
+        invalid.push(await rejectTarget(engine, presetId, target));
+      }
+    }
+    const resourcesBeforeAcceptedEncoding = await readWorkerResourceEntries(
+      worker!,
+    );
+    const accepted: BrowserMatrixResult[] = [];
+    for (const presetId of OGG_OPUS_PRESETS) {
+      for (const channels of [1, 2] as const) {
+        accepted.push(
+          await transcodePreset(engine, presetId, 48_000, channels, 48_137),
+        );
+      }
+    }
+    return { accepted, invalid, resourcesBeforeAcceptedEncoding };
+  } finally {
+    await engine.dispose();
+  }
+};
+
 window.runFlacProbeBudgetRegression = async () => {
   const pool = createAudioTranscoderStreamWorkerPool({
+    codecAssets: BROWSER_CODEC_ASSETS,
     concurrency: 1,
     idleTimeoutMs: null,
     maxQueued: 1,
@@ -430,6 +621,7 @@ window.runOutputSupportProbe = async () => {
   let outputArtifactsCreated = 0;
   let probeResult: Omit<BrowserOutputSupportProbeResult, 'disposed'> | undefined;
   const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
     workerFactory: () => {
       worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
         type: 'module',
@@ -445,12 +637,42 @@ window.runOutputSupportProbe = async () => {
       sampleRate: 24_000,
     });
     const resourcesAfterInvalidMp3 = await readWorkerResourceEntries(worker!);
+    const invalidAac = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'aac-128kbps',
+      sampleRate: 24_000,
+    });
+    const resourcesAfterInvalidAac = await readWorkerResourceEntries(worker!);
+    const invalidOgg = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'ogg-opus-128kbps',
+      sampleRate: SAMPLE_RATE,
+    });
+    const resourcesAfterInvalidOgg = await readWorkerResourceEntries(worker!);
     const wav = await engine.probeOutputSupport({
       channels: 2,
       presetId: 'wav-pcm16',
       sampleRate: SAMPLE_RATE,
     });
     const resourcesAfterWav = await readWorkerResourceEntries(worker!);
+    const aiff = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'aiff-pcm16',
+      sampleRate: SAMPLE_RATE,
+    });
+    const resourcesAfterAiff = await readWorkerResourceEntries(worker!);
+    const aac = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'aac-128kbps',
+      sampleRate: SAMPLE_RATE,
+    });
+    const resourcesAfterAac = await readWorkerResourceEntries(worker!);
+    const ogg = await engine.probeOutputSupport({
+      channels: 2,
+      presetId: 'ogg-opus-128kbps',
+      sampleRate: 48_000,
+    });
+    const resourcesAfterOgg = await readWorkerResourceEntries(worker!);
     const mp3 = await engine.probeOutputSupport({
       channels: 2,
       presetId: 'mp3-128kbps',
@@ -467,13 +689,23 @@ window.runOutputSupportProbe = async () => {
     // These public probes accept only exact targets; this harness has no output
     // sink, session, or artifact creation site that could increment the counter.
     probeResult = {
+      aac: { code: aac.code, status: aac.status },
+      aiff: { code: aiff.code, status: aiff.status },
       flac: { code: flac.code, status: flac.status },
+      invalidAac: { code: invalidAac.code, status: invalidAac.status },
       invalidMp3: { code: invalidMp3.code, status: invalidMp3.status },
+      invalidOgg: { code: invalidOgg.code, status: invalidOgg.status },
       mp3: { code: mp3.code, status: mp3.status },
+      ogg: { code: ogg.code, status: ogg.status },
       outputArtifactsCreated,
+      resourcesAfterAac,
+      resourcesAfterAiff,
       resourcesAfterFlac,
+      resourcesAfterInvalidAac,
       resourcesAfterInvalidMp3,
+      resourcesAfterInvalidOgg,
       resourcesAfterMp3,
+      resourcesAfterOgg,
       resourcesAfterWav,
       wav: { code: wav.code, status: wav.status },
     };
@@ -491,6 +723,7 @@ window.runOutputSupportProbe = async () => {
 window.runSingleOutputPreset = async (presetId) => {
   let worker: Worker | undefined;
   const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
     workerFactory: () => {
       worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
         type: 'module',
@@ -499,7 +732,11 @@ window.runSingleOutputPreset = async (presetId) => {
     },
   });
   try {
-    const result = await transcodePreset(engine, presetId);
+    const result = await transcodePreset(
+      engine,
+      presetId,
+      presetId.startsWith('ogg-opus-') ? 48_000 : SAMPLE_RATE,
+    );
     return {
       ...result,
       workerResources: await readWorkerResourceEntries(worker!),
@@ -512,6 +749,7 @@ window.runSingleOutputPreset = async (presetId) => {
 window.runMp3ConstraintMatrix = async () => {
   let worker: Worker | undefined;
   const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
     workerFactory: () => {
       worker = new Worker(new URL('./instrumented-worker.ts', import.meta.url), {
         type: 'module',
@@ -571,7 +809,9 @@ window.runMp3ConstraintMatrix = async () => {
 
 window.runInputProbeMatrix = async () => {
   const capabilities = AUDIO_TRANSCODER_STREAM_CAPABILITIES;
-  const engine = createAudioTranscoderStreamWorkerEngine();
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+  });
 
   try {
     const source = cafInput(INPUT_FIXTURE_FRAMES);
@@ -640,7 +880,9 @@ window.runInputProbeMatrix = async () => {
 };
 
 window.runBoundedStreamStress = async () => {
-  const engine = createAudioTranscoderStreamWorkerEngine();
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+  });
   const sink = new SlowSeekableDiscardSink();
   let progressEvents = 0;
 
@@ -682,7 +924,9 @@ window.runOutputSessionSmoke = async () => {
     namespace,
   });
   let engine: AudioTranscoderStreamWorkerEngine | undefined =
-    createAudioTranscoderStreamWorkerEngine();
+    createAudioTranscoderStreamWorkerEngine({
+      codecAssets: BROWSER_CODEC_ASSETS,
+    });
   let pending: Awaited<ReturnType<typeof session.create>> | undefined;
   let artifact:
     | Awaited<ReturnType<NonNullable<typeof pending>['complete']>>
@@ -768,7 +1012,9 @@ window.runOpfsAbortSmoke = async () => {
 
   const output = await handle.createWritable();
   let engine: AudioTranscoderStreamWorkerEngine | undefined =
-    createAudioTranscoderStreamWorkerEngine();
+    createAudioTranscoderStreamWorkerEngine({
+      codecAssets: BROWSER_CODEC_ASSETS,
+    });
   const controller = new AbortController();
   let code = 'NO_ERROR';
 
@@ -838,6 +1084,11 @@ async function transcodePreset(
   const bytes = sink.bytes();
   const format = result.format;
 
+  let aacFrames: number | null = null;
+  let aacObjectType: number | null = null;
+  let aiffFormBytes: number | null = null;
+  let aiffFrames: number | null = null;
+  let aiffSoundBytes: number | null = null;
   let bitDepth: number | null = null;
   let bitrate: number | null = null;
   let channels = 0;
@@ -848,6 +1099,11 @@ async function transcodePreset(
   let mp3FrameBitrates: readonly number[] | null = null;
   let mp3SeekHeader: 'Info' | 'Xing' | null = null;
   let mp3SeekHeaderFrames: number | null = null;
+  let oggEos: boolean | null = null;
+  let oggFinalGranule: number | null = null;
+  let oggPages: number | null = null;
+  let oggPreSkip: number | null = null;
+  let oggSerial: number | null = null;
   let sampleRate = 0;
   let wavBlockAlign: number | null = null;
   let wavByteRate: number | null = null;
@@ -860,6 +1116,24 @@ async function transcodePreset(
   let wavRiffBytes: number | null = null;
 
   switch (format) {
+    case 'aac': {
+      const header = inspectAdts(bytes);
+      aacFrames = header.frames;
+      aacObjectType = header.objectType;
+      channels = header.channels;
+      sampleRate = header.sampleRate;
+      break;
+    }
+    case 'aiff': {
+      const header = inspectAiff(bytes);
+      aiffFormBytes = header.formBytes;
+      aiffFrames = header.frames;
+      aiffSoundBytes = header.soundBytes;
+      bitDepth = header.bitDepth;
+      channels = header.channels;
+      sampleRate = header.sampleRate;
+      break;
+    }
     case 'wav': {
       const header = inspectWav(bytes);
       bitDepth = header.bitDepth;
@@ -897,9 +1171,25 @@ async function transcodePreset(
       sampleRate = header.sampleRate;
       break;
     }
+    case 'ogg': {
+      const header = inspectOggOpus(bytes);
+      channels = header.channels;
+      oggEos = header.eos;
+      oggFinalGranule = header.finalGranule;
+      oggPages = header.pages;
+      oggPreSkip = header.preSkip;
+      oggSerial = header.serial;
+      sampleRate = header.sampleRate;
+      break;
+    }
   }
 
   return {
+    aacFrames,
+    aacObjectType,
+    aiffFormBytes,
+    aiffFrames,
+    aiffSoundBytes,
     bitDepth,
     bitrate,
     bytesWritten: result.bytesWritten,
@@ -916,6 +1206,11 @@ async function transcodePreset(
     mp3FrameBitrates,
     mp3SeekHeader,
     mp3SeekHeaderFrames,
+    oggEos,
+    oggFinalGranule,
+    oggPages,
+    oggPreSkip,
+    oggSerial,
     presetId,
     progress,
     resultDetailsFormat: result.details.format,
@@ -1165,7 +1460,8 @@ function createFloat32Caf(
   view.setBigInt64(12, 32n, false);
   view.setFloat64(20, sampleRate, false);
   writeAscii(view, 28, 'lpcm');
-  view.setUint32(32, 1 | 4, false);
+  // CAF LPCM flags: float (1); a clear endian bit means big-endian.
+  view.setUint32(32, 1, false);
   view.setUint32(36, bytesPerSample * channels, false);
   view.setUint32(40, 1, false);
   view.setUint32(44, channels, false);
@@ -1259,6 +1555,261 @@ function writeSampleRate44100Extended80(view: DataView, offset: number): void {
   for (let index = 0; index < bytes.length; index += 1) {
     view.setUint8(offset + index, bytes[index]);
   }
+}
+
+function inspectAdts(bytes: Uint8Array): {
+  readonly channels: number;
+  readonly frames: number;
+  readonly objectType: number;
+  readonly sampleRate: number;
+} {
+  const sampleRates = [
+    96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050,
+    16_000, 12_000, 11_025, 8_000, 7_350,
+  ] as const;
+  let channels: number | undefined;
+  let frames = 0;
+  let objectType: number | undefined;
+  let offset = skipId3v2(bytes);
+  let sampleRate: number | undefined;
+
+  while (offset < bytes.byteLength) {
+    if (
+      offset + 7 > bytes.byteLength ||
+      bytes[offset] !== 0xff ||
+      (bytes[offset + 1]! & 0xf6) !== 0xf0
+    ) {
+      throw new Error(`Output ADTS frame ${frames} has an invalid sync header.`);
+    }
+    const protectionAbsent = (bytes[offset + 1]! & 1) === 1;
+    const headerBytes = protectionAbsent ? 7 : 9;
+    const frameObjectType = ((bytes[offset + 2]! >> 6) & 0x03) + 1;
+    const sampleRateIndex = (bytes[offset + 2]! >> 2) & 0x0f;
+    const frameSampleRate = sampleRates[sampleRateIndex];
+    const frameChannels =
+      ((bytes[offset + 2]! & 1) << 2) | (bytes[offset + 3]! >> 6);
+    const frameBytes =
+      ((bytes[offset + 3]! & 0x03) << 11) |
+      (bytes[offset + 4]! << 3) |
+      (bytes[offset + 5]! >> 5);
+    const rawDataBlocks = (bytes[offset + 6]! & 0x03) + 1;
+    if (
+      frameSampleRate === undefined ||
+      frameChannels === 0 ||
+      rawDataBlocks !== 1 ||
+      frameBytes <= headerBytes ||
+      offset + frameBytes > bytes.byteLength
+    ) {
+      throw new Error(`Output ADTS frame ${frames} has invalid metadata.`);
+    }
+    if (
+      (objectType !== undefined && objectType !== frameObjectType) ||
+      (sampleRate !== undefined && sampleRate !== frameSampleRate) ||
+      (channels !== undefined && channels !== frameChannels)
+    ) {
+      throw new Error('Output ADTS frames disagree on their audio configuration.');
+    }
+    objectType = frameObjectType;
+    sampleRate = frameSampleRate;
+    channels = frameChannels;
+    frames += 1;
+    offset += frameBytes;
+  }
+  if (
+    frames === 0 ||
+    offset !== bytes.byteLength ||
+    objectType === undefined ||
+    sampleRate === undefined ||
+    channels === undefined
+  ) {
+    throw new Error('Output is not a complete ADTS stream.');
+  }
+  return { channels, frames, objectType, sampleRate };
+}
+
+function inspectOggOpus(bytes: Uint8Array): {
+  readonly channels: number;
+  readonly eos: boolean;
+  readonly finalGranule: number;
+  readonly pages: number;
+  readonly preSkip: number;
+  readonly sampleRate: number;
+  readonly serial: number;
+} {
+  let channels: number | undefined;
+  let eos = false;
+  let finalGranule: bigint | undefined;
+  let offset = 0;
+  let pages = 0;
+  let preSkip: number | undefined;
+  let sampleRate: number | undefined;
+  let serial: number | undefined;
+
+  while (offset < bytes.byteLength) {
+    if (
+      offset + 27 > bytes.byteLength ||
+      readAscii(bytes, offset, 4) !== 'OggS' ||
+      bytes[offset + 4] !== 0
+    ) {
+      throw new Error(`Output Ogg page ${pages} has an invalid header.`);
+    }
+    const segments = bytes[offset + 26]!;
+    const headerBytes = 27 + segments;
+    if (offset + headerBytes > bytes.byteLength) {
+      throw new Error(`Output Ogg page ${pages} has a truncated segment table.`);
+    }
+    let bodyBytes = 0;
+    for (let index = 0; index < segments; index += 1) {
+      bodyBytes += bytes[offset + 27 + index]!;
+    }
+    const pageBytes = headerBytes + bodyBytes;
+    if (offset + pageBytes > bytes.byteLength) {
+      throw new Error(`Output Ogg page ${pages} has a truncated body.`);
+    }
+    const view = new DataView(
+      bytes.buffer,
+      bytes.byteOffset + offset,
+      pageBytes,
+    );
+    if (
+      view.getUint32(22, true) !==
+      computeOggChecksum(bytes.subarray(offset, offset + pageBytes))
+    ) {
+      throw new Error(`Output Ogg page ${pages} has an invalid checksum.`);
+    }
+    const flags = bytes[offset + 5]!;
+    const pageSerial = view.getUint32(14, true);
+    const sequence = view.getUint32(18, true);
+    if (sequence !== pages || (serial !== undefined && serial !== pageSerial)) {
+      throw new Error('Output Ogg pages have an invalid sequence or serial number.');
+    }
+    if (pages === 0) {
+      if ((flags & 0x02) === 0 || bodyBytes < 19) {
+        throw new Error('Output Ogg stream is missing its BOS OpusHead packet.');
+      }
+      const bodyOffset = offset + headerBytes;
+      if (readAscii(bytes, bodyOffset, 8) !== 'OpusHead') {
+        throw new Error('Output Ogg stream does not begin with OpusHead.');
+      }
+      channels = bytes[bodyOffset + 9]!;
+      preSkip = view.getUint16(headerBytes + 10, true);
+      sampleRate = view.getUint32(headerBytes + 12, true);
+      if (
+        bytes[bodyOffset + 8] !== 1 ||
+        channels < 1 ||
+        channels > 2 ||
+        bytes[bodyOffset + 18] !== 0
+      ) {
+        throw new Error('Output OpusHead has an unsupported channel mapping.');
+      }
+    } else if (pages === 1) {
+      const bodyOffset = offset + headerBytes;
+      if (
+        (flags & 0x02) !== 0 ||
+        bodyBytes < 8 ||
+        readAscii(bytes, bodyOffset, 8) !== 'OpusTags'
+      ) {
+        throw new Error('Output Ogg stream is missing its OpusTags packet.');
+      }
+    } else if ((flags & 0x02) !== 0) {
+      throw new Error('Output Ogg stream contains more than one BOS page.');
+    }
+    if (eos || ((flags & 0x04) !== 0 && offset + pageBytes !== bytes.byteLength)) {
+      throw new Error('Output Ogg EOS page is not the final page.');
+    }
+    eos = (flags & 0x04) !== 0;
+    finalGranule = view.getBigInt64(6, true);
+    serial = pageSerial;
+    pages += 1;
+    offset += pageBytes;
+  }
+  if (
+    pages < 3 ||
+    !eos ||
+    finalGranule === undefined ||
+    finalGranule < 0n ||
+    finalGranule > BigInt(Number.MAX_SAFE_INTEGER) ||
+    preSkip === undefined ||
+    sampleRate === undefined ||
+    channels === undefined ||
+    serial === undefined
+  ) {
+    throw new Error('Output is not a complete bounded Ogg Opus stream.');
+  }
+  return {
+    channels,
+    eos,
+    finalGranule: Number(finalGranule),
+    pages,
+    preSkip,
+    sampleRate,
+    serial,
+  };
+}
+
+function computeOggChecksum(page: Uint8Array): number {
+  let checksum = 0;
+  for (let index = 0; index < page.byteLength; index += 1) {
+    const byte = index >= 22 && index < 26 ? 0 : page[index]!;
+    checksum = (checksum ^ (byte << 24)) >>> 0;
+    for (let bit = 0; bit < 8; bit += 1) {
+      checksum =
+        ((checksum << 1) ^ ((checksum & 0x8000_0000) === 0 ? 0 : 0x04c1_1db7)) >>>
+        0;
+    }
+  }
+  return checksum;
+}
+
+function inspectAiff(bytes: Uint8Array): {
+  readonly bitDepth: number;
+  readonly channels: number;
+  readonly formBytes: number;
+  readonly frames: number;
+  readonly sampleRate: number;
+  readonly soundBytes: number;
+} {
+  if (
+    readAscii(bytes, 0, 4) !== 'FORM' ||
+    readAscii(bytes, 8, 4) !== 'AIFF' ||
+    readAscii(bytes, 12, 4) !== 'COMM' ||
+    readAscii(bytes, 38, 4) !== 'SSND'
+  ) {
+    throw new Error('Output is not a canonical AIFF file.');
+  }
+  const view = dataView(bytes);
+  const formBytes = view.getUint32(4, false);
+  const soundBytes = view.getUint32(42, false);
+  if (formBytes + 8 !== bytes.byteLength) {
+    throw new Error('Output AIFF FORM size is not finalized to the file size.');
+  }
+  if (view.getUint32(16, false) !== 18) {
+    throw new Error('Output AIFF COMM chunk is not canonical.');
+  }
+  if (54 + soundBytes - 8 + ((soundBytes - 8) % 2) !== bytes.byteLength) {
+    throw new Error('Output AIFF SSND size does not match the file size.');
+  }
+  return {
+    bitDepth: view.getUint16(26, false),
+    channels: view.getUint16(20, false),
+    formBytes,
+    frames: view.getUint32(22, false),
+    sampleRate: readExtended80(view, 28),
+    soundBytes,
+  };
+}
+
+function readExtended80(view: DataView, offset: number): number {
+  const signAndExponent = view.getUint16(offset, false);
+  const exponent = signAndExponent & 0x7fff;
+  if (exponent === 0) {
+    return 0;
+  }
+  const sign = (signAndExponent & 0x8000) === 0 ? 1 : -1;
+  const high = view.getUint32(offset + 2, false);
+  const low = view.getUint32(offset + 6, false);
+  const mantissa = high * 2 ** 32 + low;
+  return sign * (mantissa / 2 ** 63) * 2 ** (exponent - 16_383);
 }
 
 function inspectWav(bytes: Uint8Array): {

@@ -37,6 +37,11 @@ export const flacInspector: AudioInspectorAdapter = Object.freeze({
           ? ['FLAC STREAMINFO metadata was not found.']
           : ['FLAC audio data requires a browser decoder or codec plugin.'],
       sampleRate: info?.sampleRate ?? null,
+      sourceEncoding: Object.freeze({
+        bitDepth: info?.bitDepth ?? null,
+        codec: 'flac',
+        kind: 'lossless-compressed',
+      }),
     };
   },
 });

@@ -28,6 +28,7 @@ const INSPECTION: AudioStreamInspection = {
   notes: [],
   sampleRate: 48_000,
   size: 100,
+  sourceEncoding: { kind: 'unknown' },
 };
 const RESULT: AudioStreamTranscodeResult = {
   bytesWritten: 100,
@@ -52,6 +53,12 @@ const SUPPORTED_OUTPUT: AudioStreamOutputSupportResult = {
   reason: 'runtime-verified',
   status: 'supported',
 };
+const TEST_CODEC_ASSETS = Object.freeze({
+  source: Object.freeze({
+    baseUrl: '/codec-assets',
+    kind: 'self-hosted' as const,
+  }),
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -86,12 +93,16 @@ describe('audio transcoder stream Worker pool', () => {
   it('makes custom capability/runtime pairing explicit in the pool type', () => {
     type Factory = (workerIndex: number) => Worker;
 
-    expectTypeOf<{}>().toMatchTypeOf<
+    expectTypeOf<{}>().not.toMatchTypeOf<
       CreateAudioTranscoderStreamWorkerPoolOptions
     >();
-    expectTypeOf<{ workerFactory: Factory }>().toMatchTypeOf<
+    expectTypeOf<{ workerFactory: Factory }>().not.toMatchTypeOf<
       CreateAudioTranscoderStreamWorkerPoolOptions
     >();
+    expectTypeOf<{
+      codecAssets: typeof TEST_CODEC_ASSETS;
+      workerFactory: Factory;
+    }>().toMatchTypeOf<CreateAudioTranscoderStreamWorkerPoolOptions>();
     expectTypeOf<{
       runtime: 'custom';
       capabilities: AudioTranscoderStreamCapabilities;
@@ -164,6 +175,90 @@ describe('audio transcoder stream Worker pool', () => {
     await flushMicrotasks();
     expect(pool.getQueueSnapshot()).toMatchObject({ active: 0, queued: 0 });
     pool.terminate();
+  });
+
+  it('forwards codec asset loading state from each default-runtime slot', async () => {
+    const worker = new WorkerStub();
+    const onStateChange = vi.fn();
+    const pool = createAudioTranscoderStreamWorkerPool({
+      codecAssets: {
+        ...TEST_CODEC_ASSETS,
+        onStateChange,
+      },
+      idleTimeoutMs: null,
+      workerFactory: () => worker as unknown as Worker,
+    });
+    const inspection = pool.inspect(INPUT);
+
+    worker.emit({
+      state: {
+        assetName: 'resampler-balanced',
+        error: null,
+        loadedBytes: 100,
+        phase: 'downloading',
+        totalBytes: 200,
+      },
+      type: 'asset-state',
+    });
+    worker.emit({
+      id: 1,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
+    });
+
+    await inspection;
+    expect(onStateChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        assetName: 'resampler-balanced',
+        phase: 'downloading',
+      }),
+    );
+    await pool.dispose();
+  });
+
+  it('forwards asset state when the pool creates its built-in Worker', async () => {
+    const worker = new WorkerStub();
+    const onStateChange = vi.fn();
+    vi.stubGlobal(
+      'Worker',
+      class {
+        constructor() {
+          return worker as never;
+        }
+      },
+    );
+    const pool = createAudioTranscoderStreamWorkerPool({
+      codecAssets: {
+        ...TEST_CODEC_ASSETS,
+        onStateChange,
+      },
+      idleTimeoutMs: null,
+    });
+    const inspection = pool.inspect(INPUT);
+
+    worker.emit({
+      state: {
+        assetName: 'aac',
+        error: null,
+        loadedBytes: 1,
+        phase: 'ready',
+        totalBytes: 1,
+      },
+      type: 'asset-state',
+    });
+    worker.emit({
+      id: 1,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
+    });
+
+    await inspection;
+    expect(onStateChange).toHaveBeenCalledWith(
+      expect.objectContaining({ assetName: 'aac', phase: 'ready' }),
+    );
+    await pool.dispose();
   });
 
   it('forwards concrete input probes through a pool slot', async () => {
@@ -514,6 +609,7 @@ describe('audio transcoder stream Worker pool', () => {
     const abortSettlement = deferred<void>();
     const abort = vi.fn(() => abortSettlement.promise);
     const pool = createAudioTranscoderStreamWorkerPool({
+      codecAssets: TEST_CODEC_ASSETS,
       workerFactory() {
         throw new Error('factory failure');
       },
@@ -551,6 +647,7 @@ describe('audio transcoder stream Worker pool', () => {
     const abort = vi.fn(async () => undefined);
     const worker = new WorkerStub();
     const pool = createAudioTranscoderStreamWorkerPool({
+      codecAssets: TEST_CODEC_ASSETS,
       idleTimeoutMs: null,
       workerFactory() {
         controller.abort('aborted during initialization');
@@ -698,10 +795,14 @@ describe('audio transcoder stream Worker pool', () => {
     await harness.pool.dispose();
   });
 
-  it('retires a canceled Worker before opening the next destination', async () => {
+  it('retires an unresponsive canceled Worker before opening the next destination', async () => {
     const harness = createPoolHarness({ idleTimeoutMs: null });
     const controller = new AbortController();
     const active = harness.pool.inspect(INPUT, { signal: controller.signal });
+    const activeRejection = expect(active).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'stop active',
+    });
     const openDestination = vi.fn((engine) => engine.inspect(INPUT));
     const next = harness.pool.schedule(openDestination);
 
@@ -710,22 +811,15 @@ describe('audio transcoder stream Worker pool', () => {
       id: 1,
       type: 'cancel',
     });
-    await flushMicrotasks();
-    expect(openDestination).not.toHaveBeenCalled();
-
-    harness.created[0]!.worker.emit({
-      error: { message: 'worker canceled', name: 'Error' },
-      id: 1,
-      type: 'error',
-    });
-    await expect(active).rejects.toMatchObject({
-      code: 'OPERATION_ABORTED',
-      message: 'stop active',
-    });
+    await activeRejection;
     await flushMicrotasks();
     expect(harness.created[0]?.worker.terminateCalls).toBe(1);
     expect(openDestination).toHaveBeenCalledOnce();
     expect(harness.created).toHaveLength(2);
+    expect(harness.created[1]?.worker.postTypes).toEqual([
+      'configure',
+      'inspect',
+    ]);
     expect(harness.created[1]?.worker.posts[0]?.message.type).toBe('inspect');
 
     harness.created[1]!.worker.emit({
@@ -735,7 +829,56 @@ describe('audio transcoder stream Worker pool', () => {
       value: INSPECTION,
     });
     await next;
-    harness.pool.terminate();
+    await harness.pool.dispose();
+  });
+
+  it('replaces a canceled Worker without waiting for destination abort cleanup', async () => {
+    const harness = createPoolHarness({ idleTimeoutMs: null });
+    const controller = new AbortController();
+    const abortSettlement = deferred<void>();
+    const abort = vi.fn(() => abortSettlement.promise);
+    const output = new WritableStream({ abort });
+    const active = harness.pool.transcode(
+      INPUT,
+      { presetId: 'wav-pcm16' },
+      output,
+      { signal: controller.signal },
+    );
+    const activeRejection = expect(active).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'stop stuck transcode',
+    });
+    const next = harness.pool.inspect(INPUT);
+
+    controller.abort('stop stuck transcode');
+
+    await activeRejection;
+    await flushMicrotasks();
+    expect(abort).toHaveBeenCalledOnce();
+    expect(output.locked).toBe(false);
+    expect(harness.created[0]?.worker.terminateCalls).toBe(1);
+    expect(harness.created).toHaveLength(2);
+    expect(harness.created[1]?.worker.posts[0]?.message).toMatchObject({
+      id: 1,
+      type: 'inspect',
+    });
+    harness.created[1]!.worker.emit({
+      id: 1,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
+    });
+    await next;
+
+    const disposal = harness.pool.dispose();
+    let disposed = false;
+    void disposal.then(() => {
+      disposed = true;
+    });
+    await flushMicrotasks();
+    expect(disposed).toBe(false);
+    abortSettlement.resolve();
+    await disposal;
   });
 
   it('keeps repeated running cancellations at one retired Worker per attempt', async () => {
@@ -1050,13 +1193,13 @@ describe('audio transcoder stream Worker pool', () => {
     });
     await flushMicrotasks();
     expect(disposed).toBe(false);
-    expect(firstOutput.locked).toBe(true);
-    expect(secondOutput.locked).toBe(true);
+    expect(firstOutput.locked).toBe(false);
+    expect(secondOutput.locked).toBe(false);
 
     firstAbort.resolve();
     await flushMicrotasks();
     expect(firstOutput.locked).toBe(false);
-    expect(secondOutput.locked).toBe(true);
+    expect(secondOutput.locked).toBe(false);
     expect(disposed).toBe(false);
 
     secondAbort.resolve();
@@ -1100,6 +1243,57 @@ describe('audio transcoder stream Worker pool', () => {
     harness.pool.terminate();
   });
 
+  it('snapshots codec asset sources before lazy Worker allocation', async () => {
+    const source: { baseUrl: string; kind: 'self-hosted' } = {
+      baseUrl: '/codec-primary/',
+      kind: 'self-hosted',
+    };
+    const fallback: { baseUrl: string; kind: 'self-hosted' } = {
+      baseUrl: '/codec-fallback/',
+      kind: 'self-hosted',
+    };
+    const fallbackSources = [fallback];
+    const created: WorkerStub[] = [];
+    const pool = createAudioTranscoderStreamWorkerPool({
+      codecAssets: { fallbackSources, source },
+      workerFactory() {
+        const worker = new WorkerStub();
+        created.push(worker);
+        return worker as unknown as Worker;
+      },
+    });
+
+    source.baseUrl = '/mutated-primary';
+    fallback.baseUrl = '/mutated-fallback';
+    fallbackSources.push({
+      baseUrl: '/new-fallback',
+      kind: 'self-hosted',
+    });
+
+    const inspection = pool.inspect(INPUT);
+
+    expect(created).toHaveLength(1);
+    expect(created[0]?.configurations).toEqual([
+      {
+        codecAssets: {
+          fallbackSources: [
+            { baseUrl: '/codec-fallback', kind: 'self-hosted' },
+          ],
+          source: { baseUrl: '/codec-primary', kind: 'self-hosted' },
+        },
+        type: 'configure',
+      },
+    ]);
+    created[0]!.emit({
+      id: 1,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
+    });
+    await inspection;
+    await pool.dispose();
+  });
+
   it('supports immediate idle release and retaining idle Workers', async () => {
     const immediate = createPoolHarness({ idleTimeoutMs: 0 });
     const immediateResult = immediate.pool.inspect(INPUT);
@@ -1133,7 +1327,10 @@ describe('audio transcoder stream Worker pool', () => {
     'rejects invalid concurrency %s',
     (concurrency) => {
       expect(() =>
-        createAudioTranscoderStreamWorkerPool({ concurrency }),
+        createAudioTranscoderStreamWorkerPool({
+          codecAssets: TEST_CODEC_ASSETS,
+          concurrency,
+        }),
       ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIGURATION' }));
     },
   );
@@ -1142,7 +1339,10 @@ describe('audio transcoder stream Worker pool', () => {
     'rejects invalid maxQueued %s',
     (maxQueued) => {
       expect(() =>
-        createAudioTranscoderStreamWorkerPool({ maxQueued }),
+        createAudioTranscoderStreamWorkerPool({
+          codecAssets: TEST_CODEC_ASSETS,
+          maxQueued,
+        }),
       ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIGURATION' }));
     },
   );
@@ -1191,7 +1391,10 @@ describe('audio transcoder stream Worker pool', () => {
     'rejects invalid idle timeout %s',
     (idleTimeoutMs) => {
       expect(() =>
-        createAudioTranscoderStreamWorkerPool({ idleTimeoutMs }),
+        createAudioTranscoderStreamWorkerPool({
+          codecAssets: TEST_CODEC_ASSETS,
+          idleTimeoutMs,
+        }),
       ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIGURATION' }));
     },
   );
@@ -1208,6 +1411,7 @@ describe('audio transcoder stream Worker pool', () => {
     'normalizes lazy Worker factory failures %#',
     async (failure, message, code) => {
       const pool = createAudioTranscoderStreamWorkerPool({
+        codecAssets: TEST_CODEC_ASSETS,
         workerFactory() {
           throw failure;
         },
@@ -1219,7 +1423,9 @@ describe('audio transcoder stream Worker pool', () => {
 
   it('preserves the native Worker unavailable error', async () => {
     vi.stubGlobal('Worker', undefined);
-    const pool = createAudioTranscoderStreamWorkerPool();
+    const pool = createAudioTranscoderStreamWorkerPool({
+      codecAssets: TEST_CODEC_ASSETS,
+    });
     await expect(pool.inspect(INPUT)).rejects.toMatchObject({
       code: 'WORKER_UNAVAILABLE',
     });
@@ -1244,7 +1450,11 @@ function createPoolHarness(
   const pool =
     options.runtime === 'custom'
       ? createAudioTranscoderStreamWorkerPool({ ...options, workerFactory })
-      : createAudioTranscoderStreamWorkerPool({ ...options, workerFactory });
+      : createAudioTranscoderStreamWorkerPool({
+          ...options,
+          codecAssets: TEST_CODEC_ASSETS,
+          workerFactory,
+        });
   return { created, pool };
 }
 
@@ -1275,6 +1485,8 @@ class WorkerStub {
     messageerror: [] as (() => void)[],
   };
   readonly posts: WorkerPost[] = [];
+  readonly postTypes: AudioStreamWorkerRequest['type'][] = [];
+  readonly configurations: AudioStreamWorkerRequest[] = [];
   terminateCalls = 0;
 
   addEventListener(type: string, listener: EventListener): void {
@@ -1307,6 +1519,11 @@ class WorkerStub {
     message: AudioStreamWorkerRequest,
     transfer: Transferable[] = [],
   ): void {
+    this.postTypes.push(message.type);
+    if (message.type === 'configure') {
+      this.configurations.push(message);
+      return;
+    }
     this.posts.push({ message, transfer });
   }
 

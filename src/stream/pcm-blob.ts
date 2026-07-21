@@ -2,6 +2,7 @@ import type {
   AudioStreamInput,
   AudioStreamInspection,
 } from './contracts.js';
+import type { AudioSourceEncoding } from '../engine/contracts.js';
 import type { PcmStreamSource } from './pcm-source.js';
 import { AudioTranscoderError } from '../errors.js';
 import { createOperationAbortedError } from '../engine/operation-errors.js';
@@ -26,6 +27,7 @@ interface ParsedPcmBlob {
   readonly littleEndian: boolean;
   readonly sampleRate: number;
   readonly signed: boolean;
+  readonly sourceEncoding: AudioSourceEncoding;
   readonly totalFrames: number | null;
   readonly unsupportedReason?: string;
 }
@@ -216,9 +218,9 @@ async function parseCaf(
       const sampleRate = view.getFloat64(0, false);
       const formatId = readAscii(view, 8, 4);
       const float = Boolean(flags & 1);
-      const bigEndian = Boolean(flags & 2);
-      const signed = Boolean(flags & 4) || float;
-      const unsupportedLayout = Boolean(flags & 16) || Boolean(flags & 32);
+      const littleEndian = Boolean(flags & 2);
+      const bigEndian = !littleEndian;
+      const signed = !float;
       const candidateBytesPerFrame = framesPerPacket === 0
         ? 0
         : bytesPerPacket / framesPerPacket;
@@ -238,9 +240,9 @@ async function parseCaf(
         });
       }
       const unsupportedSampleFormat =
+        (flags & ~3) !== 0 ||
         (float && bitDepth !== 32 && bitDepth !== 64) ||
-        (!float && ![8, 16, 24, 32].includes(bitDepth)) ||
-        (!float && !signed && bitDepth !== 8);
+        (!float && ![8, 16, 24, 32].includes(bitDepth));
       const paddedLayout =
         bytesPerFrame !== null &&
         bytesPerFrame !== (bitDepth / 8) * channels;
@@ -249,17 +251,27 @@ async function parseCaf(
         bitDepth: bitDepth === 0 ? null : bitDepth,
         bytesPerFrame,
         channels,
-        codec: `${formatId} ${float ? 'float' : signed ? 'signed integer' : 'unsigned integer'} ${bigEndian ? 'BE' : 'LE'}`,
+        codec:
+          formatId === 'lpcm'
+            ? `${formatId} ${float ? 'float' : 'signed integer'} ${bigEndian ? 'BE' : 'LE'}`
+            : normalizeCafCodec(formatId),
         float,
-        littleEndian: !bigEndian,
+        littleEndian,
         sampleRate,
         signed,
+        sourceEncoding: getCafSourceEncoding(
+          formatId,
+          flags,
+          bitDepth,
+          float,
+          bigEndian,
+        ),
         ...(formatId !== 'lpcm'
           ? { unsupportedReason: `CAF format "${formatId}" is not LPCM.` }
-          : unsupportedLayout || paddedLayout
+          : paddedLayout
             ? {
                 unsupportedReason:
-                  'Non-interleaved, padded, or high-aligned CAF LPCM is unsupported.',
+                  'Padded CAF LPCM is unsupported.',
               }
             : unsupportedSampleFormat
               ? {
@@ -350,6 +362,7 @@ async function parseAiff(
         littleEndian: false,
         sampleRate,
         signed: true,
+        sourceEncoding: getAiffSourceEncoding(compression, bitDepth),
         ...(compression === 'NONE'
           ? {}
           : {
@@ -411,6 +424,138 @@ function toInspection(
       parsed.unsupportedReason === undefined ? [] : [parsed.unsupportedReason],
     sampleRate: parsed.sampleRate,
     size,
+    sourceEncoding: parsed.sourceEncoding,
+  });
+}
+
+function getCafSourceEncoding(
+  formatId: string,
+  flags: number,
+  bitDepth: number,
+  float: boolean,
+  bigEndian: boolean,
+): AudioSourceEncoding {
+  if (formatId === 'lpcm') {
+    return Object.freeze({
+      bitDepth,
+      endianness:
+        bitDepth <= 8 ? 'not-applicable' : bigEndian ? 'big' : 'little',
+      kind: 'pcm',
+      sampleFormat: float ? 'float' : 'integer',
+      signedness: float ? 'not-applicable' : 'signed',
+    });
+  }
+
+  const codec = normalizeCafCodec(formatId);
+  if (codec === 'alac' || codec === 'flac') {
+    return Object.freeze({
+      bitDepth:
+        codec === 'alac'
+          ? getAlacSourceBitDepth(flags)
+          : getFlacSourceBitDepth(flags),
+      codec,
+      kind: 'lossless-compressed',
+    });
+  }
+  if (
+    codec === 'aac' ||
+    codec === 'mp3' ||
+    codec === 'opus'
+  ) {
+    return Object.freeze({
+      codec,
+      estimatedBitrateBps: null,
+      kind: 'lossy-compressed',
+    });
+  }
+  return Object.freeze({ kind: 'unknown' });
+}
+
+function normalizeCafCodec(formatId: string): string {
+  const codec = formatId.trim().toLowerCase();
+  return codec === '.mp3' ? 'mp3' : codec;
+}
+
+function getAlacSourceBitDepth(flags: number): number | null {
+  switch (flags) {
+    case 1:
+      return 16;
+    case 2:
+      return 20;
+    case 3:
+      return 24;
+    case 4:
+      return 32;
+    default:
+      return null;
+  }
+}
+
+function getFlacSourceBitDepth(flags: number): number | null {
+  switch (flags) {
+    case 1:
+      return 16;
+    case 3:
+      return 24;
+    default:
+      return null;
+  }
+}
+
+function getAiffSourceEncoding(
+  compression: string,
+  bitDepth: number,
+): AudioSourceEncoding {
+  switch (compression) {
+    case 'NONE':
+    case 'twos':
+      return createPcmEncoding(bitDepth, 'integer', 'big', 'signed');
+    case 'sowt':
+      return createPcmEncoding(bitDepth, 'integer', 'little', 'signed');
+    case 'raw ':
+      return createPcmEncoding(
+        bitDepth,
+        'integer',
+        'not-applicable',
+        'unsigned',
+      );
+    case 'fl32':
+    case 'FL32':
+    case 'fl64':
+    case 'FL64':
+      return createPcmEncoding(bitDepth, 'float', 'big', 'not-applicable');
+    case 'ALAC':
+    case 'alac':
+      return Object.freeze({
+        bitDepth: null,
+        codec: 'alac',
+        kind: 'lossless-compressed',
+      });
+    case 'alaw':
+    case 'ima4':
+    case 'ulaw':
+      return Object.freeze({
+        codec: compression.trim().toLowerCase(),
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      });
+    default:
+      return Object.freeze({ kind: 'unknown' });
+  }
+}
+
+function createPcmEncoding(
+  bitDepth: number,
+  sampleFormat: 'float' | 'integer',
+  endianness: Extract<AudioSourceEncoding, { readonly kind: 'pcm' }>['endianness'],
+  signedness: Extract<AudioSourceEncoding, { readonly kind: 'pcm' }>['signedness'],
+): AudioSourceEncoding {
+  return Object.freeze({
+    bitDepth,
+    endianness: bitDepth <= 8 ? 'not-applicable' : endianness,
+    kind: 'pcm',
+    sampleFormat,
+    signedness,
   });
 }
 

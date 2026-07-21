@@ -9,9 +9,14 @@ import type {
   AudioStreamTarget,
 } from './contracts.js';
 import type { PcmStreamSource } from './pcm-source.js';
+import type { StreamingResampler } from './resampler.js';
+import type {
+  AudioStreamEncoder,
+  AudioTranscoderStreamCodecRuntime,
+} from './runtime/contracts.js';
 import { AUDIO_TRANSCODER_VERSION } from '../package-metadata.js';
 import { AUDIO_TRANSCODER_STREAM_CAPABILITIES } from './capabilities.js';
-import { DEFAULT_AUDIO_TRANSCODER_STREAM_CODEC_RUNTIME } from './runtime/default.js';
+import { createDefaultAudioTranscoderStreamCodecRuntime } from './runtime/default.js';
 
 const mocks = vi.hoisted(() => ({
   addSample: vi.fn(),
@@ -19,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   audioSamples: [] as unknown[],
   createReporter: vi.fn(),
   createResampler: vi.fn(),
+  createResamplerFactory: vi.fn(),
   customInspect: vi.fn(),
   customOpen: vi.fn(),
   mediaInspect: vi.fn(),
@@ -33,6 +39,16 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('mediabunny', () => {
+  class CustomAudioEncoder {}
+
+  class EncodedPacket {}
+
+  class AdtsOutputFormat {}
+
+  class FlacOutputFormat {}
+
+  class Mp3OutputFormat {}
+
   class StreamTarget {
     private writeListener: ((event: { end: number }) => void) | undefined;
 
@@ -121,11 +137,17 @@ vi.mock('mediabunny', () => {
   }
 
   return {
+    AdtsOutputFormat,
     AudioSample,
     AudioSampleSource,
+    CustomAudioEncoder,
+    EncodedPacket,
+    FlacOutputFormat,
+    Mp3OutputFormat,
     Output,
     StreamTarget,
     WavOutputFormat,
+    registerEncoder: vi.fn(),
   };
 });
 
@@ -142,6 +164,7 @@ vi.mock('./media-source.js', () => ({
 
 vi.mock('./resampler.js', () => ({
   createStreamingResampler: mocks.createResampler,
+  createStreamingResamplerFactory: mocks.createResamplerFactory,
 }));
 
 vi.mock('./progress.js', () => ({
@@ -149,6 +172,12 @@ vi.mock('./progress.js', () => ({
 }));
 
 import { createAudioTranscoderStreamEngine } from './engine.js';
+import { createMediaBunnyStreamEncoderAdapter } from './runtime/mediabunny-encoder.js';
+
+const TEST_CODEC_ASSETS = {
+  load: vi.fn(async () => new Uint8Array()),
+} as never;
+let TEST_CODEC_RUNTIME: AudioTranscoderStreamCodecRuntime;
 
 const INPUT = { blob: new Blob(['audio']), name: 'source.caf' };
 const INSPECTION: AudioStreamInspection = {
@@ -161,6 +190,13 @@ const INSPECTION: AudioStreamInspection = {
   notes: [],
   sampleRate: 48_000,
   size: INPUT.blob.size,
+  sourceEncoding: {
+    bitDepth: 16,
+    endianness: 'little',
+    kind: 'pcm',
+    sampleFormat: 'integer',
+    signedness: 'signed',
+  },
 };
 
 beforeEach(() => {
@@ -176,6 +212,15 @@ beforeEach(() => {
   mocks.mediaOpen.mockResolvedValue(null);
   mocks.mediaProbe.mockResolvedValue(null);
   mocks.createResampler.mockResolvedValue(null);
+  let qualityIndex = 0;
+  mocks.createResamplerFactory.mockImplementation(() => {
+    const quality = (['balanced', 'best', 'fast'] as const)[qualityIndex % 3]!;
+    qualityIndex += 1;
+    return (channels: number, input: number, output: number) =>
+      mocks.createResampler(channels, input, output, quality);
+  });
+  TEST_CODEC_RUNTIME =
+    createDefaultAudioTranscoderStreamCodecRuntime(TEST_CODEC_ASSETS);
   mocks.addSample.mockResolvedValue(undefined);
   mocks.outputStart.mockImplementation(async (output: MockOutput) => {
     output.state = 'started';
@@ -198,12 +243,26 @@ describe('bounded streaming engine', () => {
     });
     const engine = createAudioTranscoderStreamEngine({
       codecRuntime: {
-        ...DEFAULT_AUDIO_TRANSCODER_STREAM_CODEC_RUNTIME,
+        ...TEST_CODEC_RUNTIME,
         capabilities,
       },
     });
 
     expect(engine.getCapabilities()).toBe(capabilities);
+  });
+
+  it('rejects ambiguous package assets and custom runtime configuration', () => {
+    expect(() =>
+      createAudioTranscoderStreamEngine({
+        codecAssets: TEST_CODEC_ASSETS,
+        codecRuntime: TEST_CODEC_RUNTIME,
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_CONFIGURATION',
+        message: expect.stringContaining('either codecAssets'),
+      }),
+    );
   });
 
   it('keeps custom codec runtime cleanup failures secondary', async () => {
@@ -213,7 +272,7 @@ describe('bounded streaming engine', () => {
     });
     const engine = createAudioTranscoderStreamEngine({
       codecRuntime: {
-        ...DEFAULT_AUDIO_TRANSCODER_STREAM_CODEC_RUNTIME,
+        ...TEST_CODEC_RUNTIME,
         encoder: {
           id: 'custom-wasm',
           create: async () => ({
@@ -235,6 +294,82 @@ describe('bounded streaming engine', () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
+  it('cancels an encoder that is created only after the engine aborts', async () => {
+    const creation = deferred<AudioStreamEncoder>();
+    const create = vi.fn(() => creation.promise);
+    const cancel = vi.fn<(reason?: unknown) => Promise<void>>(
+      async () => undefined,
+    );
+    const engine = createAudioTranscoderStreamEngine({
+      codecRuntime: {
+        ...TEST_CODEC_RUNTIME,
+        encoder: { create, id: 'late-encoder' },
+      },
+    });
+    const controller = new AbortController();
+    const output = createOutput();
+
+    const pending = engine.transcode(
+      INPUT,
+      { presetId: 'wav-pcm16' },
+      output,
+      { signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+    controller.abort('late encoder stopped');
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'late encoder stopped',
+    });
+    creation.resolve({
+      cancel,
+      async finalize() {},
+      getBytesWritten: () => 0,
+      async start() {},
+      async write() {},
+    });
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(cancel.mock.calls[0]?.[0]).toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'late encoder stopped',
+    });
+    expect(output.locked).toBe(false);
+  });
+
+  it('closes a resampler that is created only after the engine aborts', async () => {
+    const source = createSource({ sampleRate: 44_100 });
+    mocks.customOpen.mockResolvedValue(source);
+    const creation = deferred<StreamingResampler | null>();
+    const create = vi.fn(() => creation.promise);
+    const close = vi.fn();
+    const engine = createAudioTranscoderStreamEngine({
+      codecRuntime: {
+        ...TEST_CODEC_RUNTIME,
+        resampler: { create, id: 'late-resampler' },
+      },
+    });
+    const controller = new AbortController();
+    const output = createOutput();
+
+    const pending = engine.transcode(
+      INPUT,
+      { presetId: 'wav-pcm16', sampleRate: 48_000 },
+      output,
+      { signal: controller.signal },
+    );
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+    controller.abort('late resampler stopped');
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'late resampler stopped',
+    });
+    creation.resolve({ close, flush: () => [], process: () => [] });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(output.locked).toBe(false);
+  });
+
   it('exposes package metadata and returns a custom inspection first', async () => {
     const engine = createAudioTranscoderStreamEngine();
     mocks.customInspect.mockResolvedValue(INSPECTION);
@@ -246,6 +381,16 @@ describe('bounded streaming engine', () => {
       'wav-pcm24',
       'wav-pcm32',
       'wav-float32',
+      'aiff-pcm16',
+      'aiff-pcm24',
+      'aac-96kbps',
+      'aac-128kbps',
+      'aac-192kbps',
+      'aac-256kbps',
+      'ogg-opus-64kbps',
+      'ogg-opus-96kbps',
+      'ogg-opus-128kbps',
+      'ogg-opus-192kbps',
       'mp3-128kbps',
       'mp3-192kbps',
       'mp3-256kbps',
@@ -259,6 +404,17 @@ describe('bounded streaming engine', () => {
     expect(Object.isFrozen(inspection)).toBe(true);
     expect(Object.isFrozen(inspection.notes)).toBe(true);
     expect(mocks.mediaInspect).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a legacy inspection without source encoding metadata', async () => {
+    const engine = createAudioTranscoderStreamEngine();
+    const { sourceEncoding: _sourceEncoding, ...legacyInspection } = INSPECTION;
+    mocks.customInspect.mockResolvedValue(legacyInspection);
+
+    const inspection = await engine.inspect(INPUT);
+
+    expect(inspection.sourceEncoding).toEqual({ kind: 'unknown' });
+    expect(Object.isFrozen(inspection.sourceEncoding)).toBe(true);
   });
 
   it('probes one explicit output target with a tiny encode and caches the result', async () => {
@@ -338,6 +494,7 @@ describe('bounded streaming engine', () => {
       notes: ['No registered inspector recognized this file.'],
       sampleRate: null,
       size: INPUT.blob.size,
+      sourceEncoding: { kind: 'unknown' },
     });
     expect(Object.isFrozen(unknown)).toBe(true);
     expect(Object.isFrozen(unknown.notes)).toBe(true);
@@ -572,6 +729,256 @@ describe('bounded streaming engine', () => {
     expect(mocks.outputCancel).toHaveBeenCalledOnce();
     expect(source.close).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ['AAC', 'aac-128kbps'],
+    ['MP3', 'mp3-128kbps'],
+    ['FLAC', 'flac-24bit'],
+  ] as const)(
+    'aborts a never-settling %s MediaBunny startup in the direct engine',
+    async (format, presetId) => {
+      const source = createSource();
+      mocks.customOpen.mockResolvedValue(source);
+      const startup = deferred<void>();
+      const cancellation = deferred<void>();
+      mocks.outputStart.mockReturnValueOnce(startup.promise);
+      mocks.outputCancel.mockReturnValueOnce(cancellation.promise);
+      const encoder = createMediaBunnyStreamEncoderAdapter(
+        vi.fn(async () => undefined),
+        async () => {
+          throw new Error('Unexpected Ogg encoder creation.');
+        },
+        vi.fn(),
+      );
+      const engine = createAudioTranscoderStreamEngine({
+        codecRuntime: { ...TEST_CODEC_RUNTIME, encoder },
+      });
+      const controller = new AbortController();
+      const outputAbort = deferred<void>();
+      const abort = vi.fn((_reason: unknown) => outputAbort.promise);
+      const output = createOutput({ abort });
+
+      const pending = engine.transcode(
+        INPUT,
+        { presetId },
+        output,
+        { signal: controller.signal },
+      );
+      await vi.waitFor(() => expect(mocks.outputStart).toHaveBeenCalledOnce());
+      controller.abort(`${format} engine startup stopped`);
+
+      await expect(pending).rejects.toMatchObject({
+        code: 'OPERATION_ABORTED',
+        message: `${format} engine startup stopped`,
+      });
+      expect(abort).toHaveBeenCalledOnce();
+      expect(abort.mock.calls[0]?.[0]).toMatchObject({
+        code: 'OPERATION_ABORTED',
+        message: `${format} engine startup stopped`,
+      });
+      expect(mocks.outputCancel).toHaveBeenCalledOnce();
+      expect(output.locked).toBe(false);
+      expect(source.close).toHaveBeenCalledOnce();
+
+      outputAbort.resolve();
+      startup.reject(new Error(`late ${format} engine startup failure`));
+      cancellation.reject(new Error(`late ${format} cancel failure`));
+    },
+  );
+
+  it('aborts the destination while encoder finalization is still pending', async () => {
+    const finalizationSettlement = deferred<void>();
+    const encoderStreamClosed = deferred<void>();
+    const abort = vi.fn();
+    const close = vi.fn();
+    const cancel = vi.fn(() => new Promise<void>(() => undefined));
+    const finalize = vi.fn<() => Promise<void>>();
+    const engine = createAudioTranscoderStreamEngine({
+      codecRuntime: {
+        ...TEST_CODEC_RUNTIME,
+        encoder: {
+          id: 'stuck-finalize-encoder',
+          async create({ writable }) {
+            const writer = writable.getWriter();
+            finalize.mockImplementation(async () => {
+              try {
+                await writer.close();
+                encoderStreamClosed.resolve();
+                await finalizationSettlement.promise;
+              } finally {
+                writer.releaseLock();
+              }
+            });
+            return {
+              cancel,
+              finalize,
+              getBytesWritten: () => 0,
+              async start() {},
+              async write() {},
+            };
+          },
+        },
+      },
+    });
+    const controller = new AbortController();
+    const output = createOutput({ abort, close });
+    const pending = engine.transcode(
+      INPUT,
+      { presetId: 'wav-pcm16' },
+      output,
+      { signal: controller.signal },
+    );
+    await encoderStreamClosed.promise;
+
+    expect(close).not.toHaveBeenCalled();
+
+    controller.abort('finalize stopped');
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'finalize stopped',
+    });
+    expect(abort).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+    expect(output.locked).toBe(false);
+    expect(cancel).toHaveBeenCalledOnce();
+    finalizationSettlement.resolve();
+  });
+
+  it('lets an irreversible destination close win over late cancellation', async () => {
+    const closeStarted = deferred<void>();
+    const closeSettlement = deferred<void>();
+    const abort = vi.fn();
+    const close = vi.fn(() => {
+      closeStarted.resolve();
+      return closeSettlement.promise;
+    });
+    const engine = createAudioTranscoderStreamEngine();
+    const controller = new AbortController();
+    const output = createOutput({ abort, close });
+    const pending = engine.transcode(
+      INPUT,
+      { presetId: 'wav-pcm16' },
+      output,
+      { signal: controller.signal },
+    );
+
+    await closeStarted.promise;
+    controller.abort('too late to cancel commit');
+    const settled = vi.fn();
+    void pending.then(settled, settled);
+    await Promise.resolve();
+
+    expect(settled).not.toHaveBeenCalled();
+    expect(abort).not.toHaveBeenCalled();
+    expect(output.locked).toBe(true);
+    closeSettlement.resolve();
+    await expect(pending).resolves.toMatchObject({ format: 'wav' });
+    expect(output.locked).toBe(false);
+  });
+
+  it('preserves a destination close failure over late cancellation', async () => {
+    const failure = new Error('destination close failed');
+    const closeStarted = deferred<void>();
+    const closeSettlement = deferred<void>();
+    const abort = vi.fn();
+    const close = vi.fn(() => {
+      closeStarted.resolve();
+      return closeSettlement.promise;
+    });
+    const engine = createAudioTranscoderStreamEngine();
+    const controller = new AbortController();
+    const output = createOutput({ abort, close });
+    const pending = engine.transcode(
+      INPUT,
+      { presetId: 'wav-pcm16' },
+      output,
+      { signal: controller.signal },
+    );
+
+    await closeStarted.promise;
+    controller.abort('too late to mask close failure');
+    closeSettlement.reject(failure);
+
+    await expect(pending).rejects.toBe(failure);
+    expect(abort).not.toHaveBeenCalled();
+    expect(output.locked).toBe(false);
+  });
+
+  it('aborts instead of closing when encoder result collection fails', async () => {
+    const failure = new Error('bytes written failed');
+    const abort = vi.fn();
+    const close = vi.fn();
+    const cancel = vi.fn(async () => undefined);
+    const engine = createAudioTranscoderStreamEngine({
+      codecRuntime: {
+        ...TEST_CODEC_RUNTIME,
+        encoder: {
+          id: 'throwing-result-encoder',
+          async create() {
+            return {
+              cancel,
+              async finalize() {},
+              getBytesWritten() {
+                throw failure;
+              },
+              async start() {},
+              async write() {},
+            };
+          },
+        },
+      },
+    });
+    const output = createOutput({ abort, close });
+
+    await expect(
+      engine.transcode(INPUT, { presetId: 'wav-pcm16' }, output),
+    ).rejects.toBe(failure);
+    expect(abort).toHaveBeenCalledOnce();
+    expect(abort).toHaveBeenCalledWith(failure);
+    expect(close).not.toHaveBeenCalled();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(output.locked).toBe(false);
+  });
+
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN])(
+    'rejects invalid encoder byte count %s before destination commit',
+    async (bytesWritten) => {
+      const abort = vi.fn();
+      const close = vi.fn();
+      const engine = createAudioTranscoderStreamEngine({
+        codecRuntime: {
+          ...TEST_CODEC_RUNTIME,
+          encoder: {
+            id: 'invalid-byte-count-encoder',
+            async create() {
+              return {
+                async cancel() {},
+                async finalize() {},
+                getBytesWritten: () => bytesWritten,
+                async start() {},
+                async write() {},
+              };
+            },
+          },
+        },
+      });
+
+      await expect(
+        engine.transcode(
+          INPUT,
+          { presetId: 'wav-pcm16' },
+          createOutput({ abort, close }),
+        ),
+      ).rejects.toMatchObject({
+        code: 'INVALID_CONFIGURATION',
+        message:
+          'Audio stream encoder getBytesWritten() must return a non-negative safe integer.',
+      });
+      expect(abort).toHaveBeenCalledOnce();
+      expect(close).not.toHaveBeenCalled();
+    },
+  );
 
   it.each(['canceled', 'finalized'] as const)(
     'does not cancel an already %s output after a decoder error',
@@ -849,7 +1256,7 @@ describe('bounded streaming engine', () => {
     }));
     const engine = createAudioTranscoderStreamEngine({
       codecRuntime: {
-        ...DEFAULT_AUDIO_TRANSCODER_STREAM_CODEC_RUNTIME,
+        ...TEST_CODEC_RUNTIME,
         encoder: { create: createEncoder, id: 'test-output' },
       },
     });
@@ -874,6 +1281,8 @@ describe('bounded streaming engine', () => {
 
   it('types explicit TPDF only for integer lossless preset IDs', () => {
     expectTypeOf<AudioStreamIntegerOutputPresetId>().toEqualTypeOf<
+      | 'aiff-pcm16'
+      | 'aiff-pcm24'
       | 'flac-16bit'
       | 'flac-24bit'
       | 'wav-pcm16'
@@ -881,10 +1290,18 @@ describe('bounded streaming engine', () => {
       | 'wav-pcm32'
     >();
     expectTypeOf<AudioStreamNonIntegerOutputPresetId>().toEqualTypeOf<
+      | 'aac-96kbps'
+      | 'aac-128kbps'
+      | 'aac-192kbps'
+      | 'aac-256kbps'
       | 'mp3-128kbps'
       | 'mp3-192kbps'
       | 'mp3-256kbps'
       | 'mp3-320kbps'
+      | 'ogg-opus-64kbps'
+      | 'ogg-opus-96kbps'
+      | 'ogg-opus-128kbps'
+      | 'ogg-opus-192kbps'
       | 'wav-float32'
     >();
     const integerTarget = {
@@ -1232,4 +1649,18 @@ function sampleInstances(): MockAudioSample[] {
 
 function sampleConfigs(): Record<string, unknown>[] {
   return sampleInstances().map(({ config }) => config);
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  reject(error: unknown): void;
+  resolve(value: T): void;
+} {
+  let reject!: (error: unknown) => void;
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, reject, resolve };
 }

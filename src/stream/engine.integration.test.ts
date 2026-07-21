@@ -5,8 +5,27 @@ import type {
 } from './contracts.js';
 import { createAudioTranscoderStreamEngine } from './engine.js';
 import { createAudioTranscoderEngine } from '../engine/factory.js';
+import { createTestCodecAssetProvider } from './codec-assets.test-support.js';
+
+const CODEC_ASSETS = createTestCodecAssetProvider();
 
 describe('real streaming pipeline', () => {
+  it('requires explicit codec assets before resampling', async () => {
+    const input = createFloatCaf(192_000, 1_920, () => 0);
+
+    await expect(
+      createAudioTranscoderStreamEngine().transcode(
+        { blob: input, name: 'tone.caf' },
+        { presetId: 'wav-pcm16', sampleRate: 48_000 },
+        new SeekableMemorySink().stream,
+      ),
+    ).rejects.toMatchObject({
+      code: 'INVALID_CONFIGURATION',
+      message:
+        'Codec asset resampler-balanced requires an explicit codecAssets provider.',
+    });
+  });
+
   it('converts 192 kHz CAF to exact 48 kHz 24-bit WAV frames', async () => {
     const inputFrames = 19_200;
     const input = createFloatCaf(192_000, inputFrames, (frame) =>
@@ -15,7 +34,9 @@ describe('real streaming pipeline', () => {
     const sink = new SeekableMemorySink();
     const progress = vi.fn();
 
-    const result = await createAudioTranscoderStreamEngine().transcode(
+    const result = await createAudioTranscoderStreamEngine({
+      codecAssets: CODEC_ASSETS,
+    }).transcode(
       { blob: input, name: 'tone.caf' },
       { presetId: 'wav-pcm24', sampleRate: 48_000 },
       sink.stream,
@@ -51,7 +72,9 @@ describe('real streaming pipeline', () => {
     );
     const sink = new SeekableMemorySink();
 
-    await createAudioTranscoderStreamEngine().transcode(
+    await createAudioTranscoderStreamEngine({
+      codecAssets: CODEC_ASSETS,
+    }).transcode(
       { blob: input, name: 'ultrasonic.caf' },
       {
         dither: 'none',
@@ -88,7 +111,8 @@ function createFloatCaf(
   view.setBigInt64(12, 32n, false);
   view.setFloat64(20, sampleRate, false);
   writeAscii(view, 28, 'lpcm');
-  view.setUint32(32, 1, false);
+  // CAF LPCM flags: float (1) plus little-endian (2).
+  view.setUint32(32, 1 | 2, false);
   view.setUint32(36, 4, false);
   view.setUint32(40, 1, false);
   view.setUint32(44, 1, false);

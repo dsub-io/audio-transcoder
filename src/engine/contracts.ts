@@ -26,6 +26,30 @@ export type AudioDecodeSupport =
   | 'likely-browser'
   | 'unknown';
 
+/** Structured source encoding metadata that does not require parsing `codec`. */
+export type AudioSourceEncoding =
+  | Readonly<{
+      readonly bitDepth: number | null;
+      readonly endianness: 'big' | 'little' | 'not-applicable' | 'unknown';
+      readonly kind: 'pcm';
+      readonly sampleFormat: 'float' | 'integer';
+      readonly signedness: 'not-applicable' | 'signed' | 'unknown' | 'unsigned';
+    }>
+  | Readonly<{
+      readonly bitDepth: number | null;
+      readonly codec: string;
+      readonly kind: 'lossless-compressed';
+    }>
+  | Readonly<{
+      /** First-frame estimate when available; not an average for VBR sources. */
+      readonly estimatedBitrateBps: number | null;
+      readonly codec: string;
+      readonly kind: 'lossy-compressed';
+    }>
+  | Readonly<{
+      readonly kind: 'unknown';
+    }>;
+
 export interface AudioInspection {
   readonly bitDepth: number | null;
   readonly channels: number | null;
@@ -35,6 +59,12 @@ export interface AudioInspection {
   readonly durationSeconds: number | null;
   readonly notes: readonly string[];
   readonly sampleRate: number | null;
+  /**
+   * Structured encoding metadata. Built-in inspectors always provide it.
+   * Optionality preserves compatibility with third-party inspector plugins
+   * written against releases before this field existed.
+   */
+  readonly sourceEncoding?: AudioSourceEncoding;
 }
 
 export interface PcmAudio {

@@ -15,10 +15,27 @@ export { createAudioTranscoderStreamWorkerEngine } from './stream/client.js';
 export { createAudioTranscoderStreamWorkerPool } from './stream/pool.js';
 export { AUDIO_TRANSCODER_STREAM_CAPABILITIES } from './stream/capabilities.js';
 export {
+  AUDIO_STREAM_SOURCE_SAMPLE_RATE,
+  getAudioStreamOutputEncodingOptions,
+  getAudioStreamOutputParameters,
+  resolveAudioStreamFormatTarget,
+} from './stream/format-target.js';
+export {
   AUDIO_TRANSCODER_OUTPUT_MEMORY_LIMIT_BYTES,
   createAudioTranscoderOutputSession,
 } from './stream/output-session.js';
 export { AudioTranscoderError } from './errors.js';
+export {
+  AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST,
+  AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
+  RuntimeAssetError,
+  createAudioTranscoderCodecAssetProvider,
+  createAudioTranscoderJsDelivrAssetSource,
+  createJsDelivrRuntimeAssetSource,
+  createRuntimeAssetProvider,
+  createSelfHostedRuntimeAssetSource,
+  resolveRuntimeAssetUrl,
+} from './assets/index.js';
 export {
   AUDIO_TRANSCODER_PACKAGE,
   AUDIO_TRANSCODER_VERSION,
@@ -42,6 +59,7 @@ export type {
   AudioProgressListener,
   AudioProgressPhase,
   AudioSampleFormat,
+  AudioSourceEncoding,
   AudioTranscoderEngine,
   AudioTranscoderCapabilities,
   AudioTranscoderEngineInfo,
@@ -55,6 +73,24 @@ export type {
 export type {
   AudioTranscoderErrorCode,
 } from './errors.js';
+export type {
+  AudioTranscoderCodecAssetsConfiguration,
+  AudioTranscoderCodecAssetId,
+  AudioTranscoderCodecAssetProvider,
+  CreateAudioTranscoderCodecAssetProviderOptions,
+  JsDelivrRuntimeAssetSource,
+  RuntimeAssetDescriptor,
+  RuntimeAssetErrorCode,
+  RuntimeAssetFetch,
+  RuntimeAssetLoadingPhase,
+  RuntimeAssetLoadState,
+  RuntimeAssetManifest,
+  RuntimeAssetProvider,
+  RuntimeAssetProviderOptions,
+  RuntimeAssetSource,
+  RuntimeAssetStateListener,
+  SelfHostedRuntimeAssetSource,
+} from './assets/index.js';
 export type {
   AudioTranscoderPoolScheduleOptions,
   AudioTranscoderQueueSnapshot,
@@ -125,7 +161,7 @@ export type {
   AudioStreamCodecRuntimeCapability,
   AudioStreamBuiltInInputFormatDescriptor,
   AudioStreamBuiltInOutputFormatDescriptor,
-  AudioStreamBundledWasmOutputFormatDescriptor,
+  AudioStreamRuntimeAssetOutputFormatDescriptor,
   AudioStreamInputCapability,
   AudioStreamInputCapabilityPath,
   AudioStreamInputFormatDescriptor,
@@ -149,6 +185,20 @@ export type {
   AudioStreamRuntimeInputFormatDescriptor,
   AudioTranscoderStreamCapabilities,
 } from './stream/capabilities.js';
+export type {
+  AudioStreamFormatTargetResolution,
+  AudioStreamFormatTargetResolutionError,
+  AudioStreamFormatTargetResolutionErrorReason,
+  AudioStreamFormatTargetSelection,
+  AudioStreamOutputEncodingOption,
+  AudioStreamOutputParameterDescriptor,
+  AudioStreamOutputParameterId,
+  AudioStreamOutputParameterOption,
+  AudioStreamOutputParameterSelection,
+  AudioStreamOutputParameterValue,
+  AudioStreamResolvedFormatTarget,
+  AudioStreamSampleRateSelection,
+} from './stream/format-target.js';
 export type {
   AudioTranscoderOutputArtifact,
   AudioTranscoderOutputMemoryReservation,

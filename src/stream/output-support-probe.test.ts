@@ -720,6 +720,75 @@ describe('bounded output runtime exercise', () => {
     expect(cancel).toHaveBeenCalled();
   });
 
+  it.each([
+    'encoder-start',
+    'encoder-write',
+    'encoder-finalize',
+  ] as const)(
+    'rejects promptly when abort interrupts a never-settling %s probe',
+    async (phase) => {
+      const operation = deferred<never>();
+      const cancellation = deferred<void>();
+      const reached = vi.fn(() => operation.promise);
+      const cancel = vi.fn(() => cancellation.promise);
+      const encoder = createEncoder({
+        cancel,
+        ...(phase === 'encoder-finalize' ? { finalize: reached } : {}),
+        ...(phase === 'encoder-start' ? { start: reached } : {}),
+        ...(phase === 'encoder-write' ? { write: reached } : {}),
+      });
+      const adapter = createAdapter(async () => encoder);
+      const controller = new AbortController();
+
+      const pending = exerciseAudioStreamOutputRuntime(
+        AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+        adapter,
+        WAV_TARGET,
+        controller.signal,
+      );
+      await vi.waitFor(() => expect(reached).toHaveBeenCalledOnce());
+      controller.abort(`${phase} stopped`);
+
+      await expect(pending).rejects.toMatchObject({
+        code: 'OPERATION_ABORTED',
+        message: `${phase} stopped`,
+      });
+      expect(cancel).toHaveBeenCalledOnce();
+
+      operation.reject(new Error(`late ${phase} failure`));
+      cancellation.reject(new Error(`late ${phase} cancel failure`));
+    },
+  );
+
+  it('cancels an encoder that is created only after its probe aborts', async () => {
+    const creation = deferred<AudioStreamEncoder>();
+    const cancel = vi.fn<(reason?: unknown) => Promise<void>>(
+      async () => undefined,
+    );
+    const create = vi.fn(() => creation.promise);
+    const controller = new AbortController();
+
+    const pending = exerciseAudioStreamOutputRuntime(
+      AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+      createAdapter(create),
+      WAV_TARGET,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce());
+    controller.abort('late probe encoder stopped');
+
+    await expect(pending).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'late probe encoder stopped',
+    });
+    creation.resolve(createEncoder({ cancel }));
+    await vi.waitFor(() => expect(cancel).toHaveBeenCalledOnce());
+    expect(cancel.mock.calls[0]?.[0]).toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'late probe encoder stopped',
+    });
+  });
+
   it('handles an abort while encoder creation is still pending', async () => {
     const controller = new AbortController();
     const create = vi.fn(async () => {
@@ -894,4 +963,18 @@ function withWavChannelMaximum(maximum: number) {
             },
     ),
   } as unknown as typeof AUDIO_TRANSCODER_STREAM_CAPABILITIES;
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  reject(error: unknown): void;
+  resolve(value: T): void;
+} {
+  let reject!: (error: unknown) => void;
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, reject, resolve };
 }

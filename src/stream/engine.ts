@@ -28,7 +28,11 @@ import type {
   AudioStreamOutputSampleRateConstraints,
   AudioTranscoderStreamCapabilities,
 } from './capabilities.js';
-import { DEFAULT_AUDIO_TRANSCODER_STREAM_CODEC_RUNTIME } from './runtime/default.js';
+import { createDefaultAudioTranscoderStreamCodecRuntime } from './runtime/default.js';
+import type {
+  AudioTranscoderCodecAssetId,
+  AudioTranscoderCodecAssetProvider,
+} from '../assets/audio-codec-assets.js';
 import { createStreamProgressReporter } from './progress.js';
 import {
   createAudioStreamOutputTransaction,
@@ -43,6 +47,10 @@ import {
   exerciseAudioStreamOutputRuntime,
   probeAudioStreamOutputSupport,
 } from './output-support-probe.js';
+import {
+  cleanupOperationResultAfterAbort,
+  raceWithOperationAbort,
+} from './abortable-operation.js';
 
 const RIFF_SAFE_BYTES = 0xffff_ff00;
 
@@ -57,8 +65,17 @@ interface ResolvedEncoding {
 export function createAudioTranscoderStreamEngine(
   options: CreateAudioTranscoderStreamEngineOptions = {},
 ): AudioTranscoderStreamEngine {
+  if (options.codecRuntime !== undefined && options.codecAssets !== undefined) {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      'Choose either codecAssets for the package runtime or a custom codecRuntime, not both.',
+    );
+  }
   const codecRuntime =
-    options.codecRuntime ?? DEFAULT_AUDIO_TRANSCODER_STREAM_CODEC_RUNTIME;
+    options.codecRuntime ??
+    createDefaultAudioTranscoderStreamCodecRuntime(
+      options.codecAssets ?? UNCONFIGURED_CODEC_ASSETS,
+    );
   const {
     buffers: bufferLimits,
     channels: channelLimits,
@@ -142,6 +159,7 @@ export function createAudioTranscoderStreamEngine(
       let source: PcmStreamSource | null = null;
       let encoder: AudioStreamEncoder | null = null;
       let outputTransaction: AudioStreamOutputTransaction | null = null;
+      let outputCommitStarted = false;
       let resampler: Awaited<
         ReturnType<typeof codecRuntime.resampler.create>
       > = null;
@@ -173,18 +191,30 @@ export function createAudioTranscoderStreamEngine(
           source,
           codecRuntime.capabilities,
         );
-        resampler = source.sampleRate === resolvedTarget.sampleRate
-          ? null
-          : await codecRuntime.resampler.create(
-              resolvedTarget.channels,
-              source.sampleRate,
-              resolvedTarget.sampleRate,
-              resolvedTarget.resampleQuality,
-            );
+        if (source.sampleRate === resolvedTarget.sampleRate) {
+          resampler = null;
+        } else {
+          const resamplerCreation = codecRuntime.resampler.create(
+            resolvedTarget.channels,
+            source.sampleRate,
+            resolvedTarget.sampleRate,
+            resolvedTarget.resampleQuality,
+            options.signal,
+          );
+          cleanupOperationResultAfterAbort(
+            resamplerCreation,
+            options.signal,
+            (lateResampler) => lateResampler?.close(),
+          );
+          resampler = await raceWithOperationAbort(
+            resamplerCreation,
+            options.signal,
+          );
+        }
         reporter.throwIfAborted();
 
         outputTransaction = createAudioStreamOutputTransaction(writable);
-        encoder = await codecRuntime.encoder.create({
+        const encoderCreation = codecRuntime.encoder.create({
           channels: resolvedTarget.channels,
           outputChunkBytes: operation.outputChunkBytes,
           preset: resolvedTarget.encoding.preset,
@@ -193,7 +223,16 @@ export function createAudioTranscoderStreamEngine(
           ...(options.signal === undefined ? {} : { signal: options.signal }),
           writable: outputTransaction.stream,
         });
-        await encoder.start();
+        cleanupOperationResultAfterAbort(
+          encoderCreation,
+          options.signal,
+          (lateEncoder, reason) => lateEncoder.cancel(reason),
+        );
+        encoder = await raceWithOperationAbort(
+          encoderCreation,
+          options.signal,
+        );
+        await raceWithOperationAbort(encoder.start(), options.signal);
 
         const dither = createDither(
           resolvedTarget.dither,
@@ -227,6 +266,7 @@ export function createAudioTranscoderStreamEngine(
               resolvedTarget,
               outputFrames,
               dither,
+              options.signal,
             );
           }
           reporter.report(
@@ -244,6 +284,7 @@ export function createAudioTranscoderStreamEngine(
               resolvedTarget,
               outputFrames,
               dither,
+              options.signal,
             );
           }
         }
@@ -263,40 +304,59 @@ export function createAudioTranscoderStreamEngine(
         resampler = null;
         source.close();
         source = null;
-        await encoder.finalize();
-        await outputTransaction.commit();
+        await raceWithOperationAbort(encoder.finalize(), options.signal);
+        const bytesWritten = encoder.getBytesWritten();
+        validateEncoderBytesWritten(bytesWritten);
+        const result: AudioStreamTranscodeResult =
+          resolvedTarget.encoding.format === 'wav'
+            ? Object.freeze({
+                bytesWritten,
+                channels: resolvedTarget.channels,
+                details: Object.freeze({
+                  format: 'wav' as const,
+                  rf64: resolvedTarget.rf64!,
+                }),
+                durationSeconds: outputFrames / resolvedTarget.sampleRate,
+                format: 'wav' as const,
+                preset: resolvedTarget.encoding.preset,
+                rf64: resolvedTarget.rf64!,
+                sampleRate: resolvedTarget.sampleRate,
+              })
+            : Object.freeze({
+                bytesWritten,
+                channels: resolvedTarget.channels,
+                details: Object.freeze({
+                  format: resolvedTarget.encoding.format,
+                }),
+                durationSeconds: outputFrames / resolvedTarget.sampleRate,
+                format: resolvedTarget.encoding.format,
+                preset: resolvedTarget.encoding.preset,
+                sampleRate: resolvedTarget.sampleRate,
+              });
         reporter.complete();
-        const result = {
-          bytesWritten: encoder.getBytesWritten(),
-          channels: resolvedTarget.channels,
-          durationSeconds: outputFrames / resolvedTarget.sampleRate,
-          preset: resolvedTarget.encoding.preset,
-          sampleRate: resolvedTarget.sampleRate,
-        };
-        if (resolvedTarget.encoding.format === 'wav') {
-          return Object.freeze({
-            ...result,
-            details: Object.freeze({
-              format: 'wav' as const,
-              rf64: resolvedTarget.rf64!,
-            }),
-            format: 'wav' as const,
-            rf64: resolvedTarget.rf64!,
-          });
-        }
-        return Object.freeze({
-          ...result,
-          details: Object.freeze({ format: resolvedTarget.encoding.format }),
-          format: resolvedTarget.encoding.format,
-        });
+        // This synchronous call begins the irreversible destination close.
+        // Cancellation was checked by reporter.complete() immediately before
+        // it; after this point success (or a close failure) wins.
+        outputCommitStarted = true;
+        await outputTransaction.commit();
+        return result;
       } catch (error) {
         if (outputTransaction === null) {
-          await abortWritable(writable, error);
+          await abortWritable(writable, error, options.signal);
         } else {
-          await outputTransaction.abort(error).catch(() => undefined);
+          await raceWithOperationAbort(
+            outputTransaction.abort(error),
+            options.signal,
+          ).catch(() => undefined);
         }
         if (encoder !== null) {
-          await encoder.cancel(error).catch(() => undefined);
+          await raceWithOperationAbort(
+            encoder.cancel(error),
+            options.signal,
+          ).catch(() => undefined);
+        }
+        if (options.signal?.aborted && !outputCommitStarted) {
+          throw createOperationAbortedError(options.signal);
         }
         throw error;
       } finally {
@@ -306,6 +366,26 @@ export function createAudioTranscoderStreamEngine(
     },
   };
 }
+
+function validateEncoderBytesWritten(bytesWritten: number): void {
+  if (!Number.isSafeInteger(bytesWritten) || bytesWritten < 0) {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      'Audio stream encoder getBytesWritten() must return a non-negative safe integer.',
+    );
+  }
+}
+
+const UNCONFIGURED_CODEC_ASSETS = Object.freeze({
+  load(assetName: AudioTranscoderCodecAssetId): Promise<never> {
+    return Promise.reject(
+      new AudioTranscoderError(
+        'INVALID_CONFIGURATION',
+        `Codec asset ${assetName} requires an explicit codecAssets provider.`,
+      ),
+    );
+  },
+}) as Pick<AudioTranscoderCodecAssetProvider, 'load'>;
 
 function resolveInspectionOptions(
   options: AudioStreamOperationOptions,
@@ -523,13 +603,17 @@ async function writeSamples(
   target: ResolvedTarget,
   outputFrames: number,
   dither: ((samples: Float32Array) => void) | null,
+  signal?: AbortSignal,
 ): Promise<number> {
   if (samples.length === 0) {
     return 0;
   }
   dither?.(samples);
   const frames = samples.length / target.channels;
-  await encoder.write(samples, outputFrames);
+  await raceWithOperationAbort(
+    encoder.write(samples, outputFrames),
+    signal,
+  );
   return frames;
 }
 
@@ -710,6 +794,7 @@ function unknownInspection(size: number): AudioStreamInspection {
     notes: ['No registered inspector recognized this file.'],
     sampleRate: null,
     size,
+    sourceEncoding: Object.freeze({ kind: 'unknown' }),
   });
 }
 
@@ -719,15 +804,21 @@ function freezeInspection(
   return Object.freeze({
     ...inspection,
     notes: Object.freeze([...inspection.notes]),
+    sourceEncoding: Object.freeze(
+      inspection.sourceEncoding ?? { kind: 'unknown' as const },
+    ),
   });
 }
 
 async function abortWritable(
   writable: AudioStreamOutput,
   reason: unknown,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (writable instanceof WritableStream && !writable.locked) {
-    await writable.abort(reason).catch(() => undefined);
+    await raceWithOperationAbort(writable.abort(reason), signal).catch(
+      () => undefined,
+    );
   }
 }
 

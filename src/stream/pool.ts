@@ -100,7 +100,7 @@ interface WorkerSlot {
 }
 
 export function createAudioTranscoderStreamWorkerPool(
-  options: CreateAudioTranscoderStreamWorkerPoolOptions = {},
+  options: CreateAudioTranscoderStreamWorkerPoolOptions,
 ): AudioTranscoderStreamWorkerPool {
   const runtime = resolveAudioTranscoderStreamWorkerRuntime(options);
   const capabilities = runtime.capabilities;
@@ -261,9 +261,23 @@ export function createAudioTranscoderStreamWorkerPool(
         workerFactory: () => runtime.workerFactory(slot.index),
       });
     } else if (workerFactory === undefined) {
-      engine = createAudioTranscoderStreamWorkerEngine({ maxQueued: 0 });
+      engine = createAudioTranscoderStreamWorkerEngine({
+        codecAssets: {
+          ...runtime.codecAssets,
+          ...(runtime.onAssetStateChange === undefined
+            ? {}
+            : { onStateChange: runtime.onAssetStateChange }),
+        },
+        maxQueued: 0,
+      });
     } else {
       engine = createAudioTranscoderStreamWorkerEngine({
+        codecAssets: {
+          ...runtime.codecAssets,
+          ...(runtime.onAssetStateChange === undefined
+            ? {}
+            : { onStateChange: runtime.onAssetStateChange }),
+        },
         maxQueued: 0,
         workerFactory: () => workerFactory(slot.index),
       });
@@ -285,15 +299,16 @@ export function createAudioTranscoderStreamWorkerPool(
     } else if (isOperationAbortedError(error) && slot.engine !== undefined) {
       const retiredEngine = slot.engine;
       slot.engine = undefined;
-      const finishRetirement = (): void => {
-        slot.active = false;
+      // The child client has already terminated its stuck Worker. Track any
+      // non-cooperative output cleanup for pool disposal without withholding
+      // this slot from queued replacement work.
+      void disposeWorkerEngine(retiredEngine);
+      slot.active = false;
+      void Promise.resolve().then(() => {
         if (!terminated) {
           drain();
         }
-      };
-      void Promise.allSettled([disposeWorkerEngine(retiredEngine)]).then(
-        finishRetirement,
-      );
+      });
     } else {
       slot.active = false;
       drain();

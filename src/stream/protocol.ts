@@ -11,8 +11,32 @@ import type {
   AudioStreamTranscodeResult,
 } from './contracts.js';
 import type { SerializedWorkerError } from '../worker/protocol.js';
+import type {
+  RuntimeAssetErrorCode,
+  RuntimeAssetSource,
+} from '../assets/runtime-asset-provider.js';
+
+export interface AudioStreamWorkerCodecAssetConfiguration {
+  readonly fallbackSources?: readonly RuntimeAssetSource[];
+  readonly source: RuntimeAssetSource;
+}
+
+export interface AudioStreamWorkerAssetLoadState {
+  readonly assetName: string;
+  readonly error: {
+    readonly code: RuntimeAssetErrorCode;
+    readonly message: string;
+  } | null;
+  readonly loadedBytes: number;
+  readonly phase: import('../assets/runtime-asset-provider.js').RuntimeAssetLoadingPhase;
+  readonly totalBytes: number | null;
+}
 
 export type AudioStreamWorkerRequest =
+  | {
+      readonly codecAssets: AudioStreamWorkerCodecAssetConfiguration;
+      readonly type: 'configure';
+    }
   | {
       readonly id: number;
       readonly input: AudioStreamInput;
@@ -49,6 +73,17 @@ export type StreamWorkerOperationOptions = Pick<
 >;
 
 export type AudioStreamWorkerResponse =
+  | {
+      readonly type: 'configured';
+    }
+  | {
+      readonly error: SerializedWorkerError;
+      readonly type: 'configuration-error';
+    }
+  | {
+      readonly state: AudioStreamWorkerAssetLoadState;
+      readonly type: 'asset-state';
+    }
   | {
       readonly id: number;
       readonly progress: AudioStreamProgress;

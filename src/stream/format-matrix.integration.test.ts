@@ -12,6 +12,9 @@ import {
 } from '../codecs/wav-presets.js';
 import { STREAM_OUTPUT_PRESETS } from '../codecs/stream-output-presets.js';
 import { createAudioTranscoderEngine } from '../engine/factory.js';
+import { createTestCodecAssetProvider } from './codec-assets.test-support.js';
+
+const CODEC_ASSETS = createTestCodecAssetProvider();
 
 const EXPECTED_OUTPUTS = Object.freeze([
   {
@@ -72,11 +75,11 @@ const EXPECTED_INPUT_CAPABILITIES = Object.freeze([
 const EXPECTED_CODEC_RUNTIME = Object.freeze({
   encoderAdapter: 'mediabunny',
   inputAdapters: Object.freeze(['dsub-pcm', 'mediabunny']),
-  resamplerAdapter: 'libsamplerate-js',
+  resamplerAdapter: 'libsamplerate-wasm',
 });
 
 const EXPECTED_INPUT_IDS = Object.freeze([
-  'caf-u8',
+  'caf-s8',
   'caf-s16-be',
   'caf-s24-le',
   'caf-s32-be',
@@ -91,12 +94,12 @@ const EXPECTED_INPUT_IDS = Object.freeze([
 ] as const);
 
 const INPUTS: readonly MatrixInput[] = Object.freeze([
-  cafInput('caf-u8', 48_000, 1, 8, false, true, false),
-  cafInput('caf-s16-be', 44_100, 2, 16, false, false, true),
-  cafInput('caf-s24-le', 96_000, 1, 24, false, true, true),
-  cafInput('caf-s32-be', 192_000, 2, 32, false, false, true),
-  cafInput('caf-f32-le', 192_000, 1, 32, true, true, true),
-  cafInput('caf-f64-be', 48_000, 2, 64, true, false, true),
+  cafInput('caf-s8', 48_000, 1, 8, false, false),
+  cafInput('caf-s16-be', 44_100, 2, 16, false, false),
+  cafInput('caf-s24-le', 96_000, 1, 24, false, true),
+  cafInput('caf-s32-be', 192_000, 2, 32, false, false),
+  cafInput('caf-f32-le', 192_000, 1, 32, true, true),
+  cafInput('caf-f64-be', 48_000, 2, 64, true, false),
   aiffInput('aiff-s16', 44_100, 1, 16, false),
   aiffInput('aiff-s24', 96_000, 2, 24, false),
   aiffInput('aiff-s32', 48_000, 1, 32, false),
@@ -188,7 +191,9 @@ describe('strict streaming format matrix', () => {
     async ({ channels, input, output, sampleRate }) => {
       const blob = await getInput(input);
       const sink = new SeekableMemorySink();
-      const result = await createAudioTranscoderStreamEngine().transcode(
+      const result = await createAudioTranscoderStreamEngine({
+        codecAssets: CODEC_ASSETS,
+      }).transcode(
         { blob, name: `${input.id}.${input.extension}` },
         {
           channels,
@@ -239,7 +244,9 @@ describe('strict streaming format matrix', () => {
     async ({ id }) => {
       const input = INPUTS[0]!;
       const sink = new SeekableMemorySink();
-      await createAudioTranscoderStreamEngine().transcode(
+      await createAudioTranscoderStreamEngine({
+        codecAssets: CODEC_ASSETS,
+      }).transcode(
         { blob: await getInput(input), name: 'source.caf' },
         { presetId: id, wavContainer: 'rf64' },
         sink.stream,
@@ -277,7 +284,6 @@ function cafInput(
   bitDepth: 8 | 16 | 24 | 32 | 64,
   float: boolean,
   littleEndian: boolean,
-  signed: boolean,
 ): MatrixInput {
   const frames = 256;
   return {
@@ -288,7 +294,6 @@ function cafInput(
       frames,
       littleEndian,
       sampleRate,
-      signed,
     }),
     extension: 'caf',
     frames,
@@ -353,7 +358,6 @@ function createCaf(options: {
   readonly frames: number;
   readonly littleEndian: boolean;
   readonly sampleRate: number;
-  readonly signed: boolean;
 }): Blob {
   const bytesPerSample = options.bitDepth / 8;
   const payloadBytes = options.frames * options.channels * bytesPerSample;
@@ -367,8 +371,7 @@ function createCaf(options: {
   writeAscii(view, 28, 'lpcm');
   const flags =
     (options.float ? 1 : 0) |
-    (options.littleEndian ? 0 : 2) |
-    (options.signed ? 4 : 0);
+    (options.littleEndian ? 2 : 0);
   view.setUint32(32, flags, false);
   view.setUint32(36, bytesPerSample * options.channels, false);
   view.setUint32(40, 1, false);
@@ -413,7 +416,6 @@ function createAiff(options: {
     ...options,
     float: false,
     littleEndian: false,
-    signed: true,
   });
   return new Blob([buffer], { type: 'audio/aiff' });
 }
@@ -427,7 +429,6 @@ function writeInterleavedPcm(
     readonly float: boolean;
     readonly frames: number;
     readonly littleEndian: boolean;
-    readonly signed: boolean;
   },
 ): void {
   const bytesPerSample = options.bitDepth / 8;
@@ -441,11 +442,7 @@ function writeInterleavedPcm(
       } else if (options.float) {
         view.setFloat64(sampleOffset, sample, options.littleEndian);
       } else if (options.bitDepth === 8) {
-        if (options.signed) {
-          view.setInt8(sampleOffset, toInteger(sample, 8));
-        } else {
-          view.setUint8(sampleOffset, toInteger(sample, 8) + 128);
-        }
+        view.setInt8(sampleOffset, toInteger(sample, 8));
       } else if (options.bitDepth === 16) {
         view.setInt16(sampleOffset, toInteger(sample, 16), options.littleEndian);
       } else if (options.bitDepth === 24) {

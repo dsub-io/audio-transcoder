@@ -214,6 +214,9 @@ function freezeInspection(inspection: AudioInspection): AudioInspection {
   return Object.freeze({
     ...inspection,
     notes: Object.freeze([...inspection.notes]),
+    sourceEncoding: Object.freeze(
+      inspection.sourceEncoding ?? { kind: 'unknown' as const },
+    ),
   });
 }
 
@@ -238,5 +241,6 @@ function createUnknownInspection(input: AudioInput): AudioInspection {
       'Unknown header. A browser or codec plugin may still support this input.',
     ],
     sampleRate: null,
+    sourceEncoding: Object.freeze({ kind: 'unknown' }),
   };
 }

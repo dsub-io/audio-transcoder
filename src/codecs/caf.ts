@@ -2,6 +2,7 @@ import { AudioTranscoderError } from '../errors.js';
 import type {
   AudioInput,
   AudioInspection,
+  AudioSourceEncoding,
   DecodedAudio,
 } from '../engine/contracts.js';
 import { readAscii, readInt64BE } from './binary.js';
@@ -81,12 +82,17 @@ export const cafInspector: AudioInspectorAdapter = Object.freeze({
       !hasUnsupportedLpcmSampleRepresentation(description);
 
     return {
-      bitDepth: description?.bitDepth ?? null,
+      bitDepth:
+        description !== null && description.bitDepth > 0
+          ? description.bitDepth
+          : null,
       channels: description?.channels ?? null,
       codec:
         description === null
           ? 'Unknown'
-          : `${description.formatId} ${decodeCafFlags(description.flags).label}`,
+          : description.formatId === 'lpcm'
+            ? `${description.formatId} ${decodeCafFlags(description.flags).label}`
+            : normalizeCafCodec(description.formatId),
       container: 'CAF',
       decodeSupport: builtIn ? 'built-in' : 'browser-dependent',
       durationSeconds,
@@ -99,6 +105,7 @@ export const cafInspector: AudioInspectorAdapter = Object.freeze({
               ? [getUnsupportedCafLpcmNote(description, bytesPerFrame)]
               : ['Compressed CAF requires a browser decoder or codec plugin.'],
       sampleRate: description?.sampleRate ?? null,
+      sourceEncoding: getCafSourceEncoding(description),
     };
   },
 });
@@ -147,7 +154,7 @@ export const cafDecoder: AudioDecoderAdapter = Object.freeze({
             {
               float: flags.float,
               littleEndian: !flags.bigEndian,
-              signed: flags.signed || flags.float,
+              signed: flags.signed,
             },
           );
         }
@@ -243,7 +250,7 @@ function prepareCafDecode(input: AudioInput): PreparedCafDecode | null {
   if (hasUnsupportedLpcmLayout(description, bytesPerFrame)) {
     throw new AudioTranscoderError(
       'UNSUPPORTED_INPUT',
-      'Non-interleaved, padded, or high-aligned CAF LPCM is not built in.',
+      'Padded CAF LPCM is not built in.',
     );
   }
   if (hasUnsupportedLpcmSampleRepresentation(description)) {
@@ -275,13 +282,10 @@ function prepareCafDecode(input: AudioInput): PreparedCafDecode | null {
 
 function decodeCafFlags(flags: number): CafFlags {
   const float = Boolean(flags & 1);
-  const bigEndian = Boolean(flags & 2);
-  const signed = Boolean(flags & 4);
-  const sampleFormat = float
-    ? 'float'
-    : signed
-      ? 'signed int'
-      : 'unsigned int';
+  const littleEndian = Boolean(flags & 2);
+  const bigEndian = !littleEndian;
+  const signed = !float;
+  const sampleFormat = float ? 'float' : 'signed int';
 
   return {
     bigEndian,
@@ -289,6 +293,84 @@ function decodeCafFlags(flags: number): CafFlags {
     label: `${sampleFormat} ${bigEndian ? 'BE' : 'LE'}`,
     signed,
   };
+}
+
+function getCafSourceEncoding(
+  description: CafDescription | null,
+): AudioSourceEncoding {
+  if (description === null) {
+    return Object.freeze({ kind: 'unknown' });
+  }
+  if (description.formatId === 'lpcm') {
+    const flags = decodeCafFlags(description.flags);
+    return Object.freeze({
+      bitDepth: description.bitDepth > 0 ? description.bitDepth : null,
+      endianness:
+        description.bitDepth <= 8
+          ? 'not-applicable'
+          : flags.bigEndian
+            ? 'big'
+            : 'little',
+      kind: 'pcm',
+      sampleFormat: flags.float ? 'float' : 'integer',
+      signedness: flags.float ? 'not-applicable' : 'signed',
+    });
+  }
+
+  const codec = normalizeCafCodec(description.formatId);
+  if (codec === 'alac' || codec === 'flac') {
+    return Object.freeze({
+      bitDepth:
+        codec === 'alac'
+          ? getAlacSourceBitDepth(description.flags)
+          : getFlacSourceBitDepth(description.flags),
+      codec,
+      kind: 'lossless-compressed',
+    });
+  }
+  if (
+    codec === 'aac' ||
+    codec === 'mp3' ||
+    codec === 'opus'
+  ) {
+    return Object.freeze({
+      codec,
+      estimatedBitrateBps: null,
+      kind: 'lossy-compressed',
+    });
+  }
+  return Object.freeze({ kind: 'unknown' });
+}
+
+function normalizeCafCodec(formatId: string): string {
+  const codec = formatId.trim().toLowerCase();
+  return codec === '.mp3' ? 'mp3' : codec;
+}
+
+function getAlacSourceBitDepth(flags: number): number | null {
+  switch (flags) {
+    case 1:
+      return 16;
+    case 2:
+      return 20;
+    case 3:
+      return 24;
+    case 4:
+      return 32;
+    default:
+      return null;
+  }
+}
+
+function getFlacSourceBitDepth(flags: number): number | null {
+  switch (flags) {
+    case 1:
+      return 16;
+    case 3:
+      return 24;
+    default:
+      return null;
+  }
 }
 
 function getCafBytesPerFrame(description: CafDescription): number | null {
@@ -320,21 +402,21 @@ function hasUnsupportedLpcmLayout(
   description: CafDescription,
   bytesPerFrame: number,
 ): boolean {
-  const alignedHigh = Boolean(description.flags & 16);
-  const nonInterleaved = Boolean(description.flags & 32);
   const packedFrameBytes =
     (description.bitDepth / 8) * description.channels;
-  return alignedHigh || nonInterleaved || bytesPerFrame !== packedFrameBytes;
+  return bytesPerFrame !== packedFrameBytes;
 }
 
 function hasUnsupportedLpcmSampleRepresentation(
   description: CafDescription,
 ): boolean {
   const flags = decodeCafFlags(description.flags);
-  return flags.float
-    ? description.bitDepth !== 32 && description.bitDepth !== 64
-    : ![8, 16, 24, 32].includes(description.bitDepth) ||
-        (!flags.signed && description.bitDepth !== 8);
+  return (
+    (description.flags & ~3) !== 0 ||
+    (flags.float
+      ? description.bitDepth !== 32 && description.bitDepth !== 64
+      : ![8, 16, 24, 32].includes(description.bitDepth))
+  );
 }
 
 function isValidCafLpcmDescription(description: CafDescription): boolean {

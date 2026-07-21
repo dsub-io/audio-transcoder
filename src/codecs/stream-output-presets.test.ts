@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { AIFF_OUTPUT_PRESETS } from './aiff.js';
 import { WAV_OUTPUT_PRESET_DESCRIPTORS } from './wav-presets.js';
 import {
+  AAC_OUTPUT_CODEC_CONSTRAINTS,
+  AAC_OUTPUT_PRESET_DESCRIPTORS,
+  AAC_OUTPUT_SAMPLE_RATES,
+  AIFF_OUTPUT_CODEC_CONSTRAINTS,
+  AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS,
   FLAC_OUTPUT_CODEC_CONSTRAINTS,
   FLAC_OUTPUT_PRESET_DESCRIPTORS,
   FLAC_OUTPUT_SAMPLE_RATES,
@@ -11,6 +17,9 @@ import {
   MP3_HIGH_BITRATE_OUTPUT_CODEC_CONSTRAINTS,
   MP3_HIGH_BITRATE_OUTPUT_SAMPLE_RATES,
   MP3_OUTPUT_PRESET_DESCRIPTORS,
+  OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS,
+  OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS,
+  OGG_OPUS_OUTPUT_SAMPLE_RATES,
   STREAM_OUTPUT_PRESET_DESCRIPTORS,
   STREAM_OUTPUT_PRESETS,
   WAV_OUTPUT_CODEC_CONSTRAINTS,
@@ -33,6 +42,37 @@ describe('stream output presets', () => {
         wasmCodec: null,
       });
       expect(descriptor.preset).toBe(wav?.preset);
+    });
+  });
+
+  it('reuses the whole-buffer AIFF presets for bounded big-endian PCM output', () => {
+    expect(AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS).toEqual([
+      {
+        bitDepth: 16,
+        codec: 'pcm-s16be',
+        constraints: AIFF_OUTPUT_CODEC_CONSTRAINTS,
+        encoding: null,
+        format: 'aiff',
+        integer: true,
+        kind: 'lossless',
+        preset: AIFF_OUTPUT_PRESETS[0],
+        wasmCodec: null,
+      },
+      {
+        bitDepth: 24,
+        codec: 'pcm-s24be',
+        constraints: AIFF_OUTPUT_CODEC_CONSTRAINTS,
+        encoding: null,
+        format: 'aiff',
+        integer: true,
+        kind: 'lossless',
+        preset: AIFF_OUTPUT_PRESETS[1],
+        wasmCodec: null,
+      },
+    ]);
+    expect(AIFF_OUTPUT_CODEC_CONSTRAINTS).toEqual({
+      channels: { maximum: 32, minimum: 1 },
+      sampleRate: { kind: 'range', maximum: 384_000, minimum: 8_000 },
     });
   });
 
@@ -64,6 +104,60 @@ describe('stream output presets', () => {
         wasmCodec: 'mp3',
       })),
     );
+  });
+
+  it('defines deterministic AAC-LC ADTS targets with explicit bitrates', () => {
+    expect(AAC_OUTPUT_PRESET_DESCRIPTORS).toEqual(
+      [96_000, 128_000, 192_000, 256_000].map((bitrate) => ({
+        bitrate,
+        codec: 'aac',
+        constraints: AAC_OUTPUT_CODEC_CONSTRAINTS,
+        encoding: { bitrate, bitrateMode: 'variable', codec: 'aac' },
+        format: 'aac',
+        kind: 'lossy',
+        preset: {
+          bitDepth: null,
+          container: 'adts',
+          extension: 'aac',
+          id: `aac-${bitrate / 1_000}kbps`,
+          mimeType: 'audio/aac',
+          sampleFormat: 'lossy',
+        },
+        wasmCodec: 'aac',
+      })),
+    );
+    expect(AAC_OUTPUT_SAMPLE_RATES).toEqual([32_000, 44_100, 48_000]);
+    expect(AAC_OUTPUT_CODEC_CONSTRAINTS.channels).toEqual({
+      maximum: 2,
+      minimum: 1,
+    });
+  });
+
+  it('defines gapless Ogg Opus targets at the codec clock rate', () => {
+    expect(OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS).toEqual(
+      [64_000, 96_000, 128_000, 192_000].map((bitrate) => ({
+        bitrate,
+        codec: 'opus',
+        constraints: OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS,
+        encoding: null,
+        format: 'ogg',
+        kind: 'lossy',
+        preset: {
+          bitDepth: null,
+          container: 'ogg',
+          extension: 'ogg',
+          id: `ogg-opus-${bitrate / 1_000}kbps`,
+          mimeType: 'audio/ogg',
+          sampleFormat: 'lossy',
+        },
+        wasmCodec: 'ogg-opus',
+      })),
+    );
+    expect(OGG_OPUS_OUTPUT_SAMPLE_RATES).toEqual([48_000]);
+    expect(OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS.channels).toEqual({
+      maximum: 2,
+      minimum: 1,
+    });
   });
 
   it('models the official FLAC extension as 16-bit or 24-bit integer output', () => {
@@ -108,7 +202,7 @@ describe('stream output presets', () => {
   });
 
   it('publishes deeply immutable aggregate descriptors and preset lookup', () => {
-    expect(STREAM_OUTPUT_PRESET_DESCRIPTORS).toHaveLength(10);
+    expect(STREAM_OUTPUT_PRESET_DESCRIPTORS).toHaveLength(20);
     expect(STREAM_OUTPUT_PRESETS).toEqual(
       STREAM_OUTPUT_PRESET_DESCRIPTORS.map(({ preset }) => preset),
     );
@@ -120,9 +214,11 @@ describe('stream output presets', () => {
       expect(Object.isFrozen(descriptor.constraints)).toBe(true);
       expect(Object.isFrozen(descriptor.constraints.channels)).toBe(true);
       expect(Object.isFrozen(descriptor.constraints.sampleRate)).toBe(true);
-      expect(Object.isFrozen(descriptor.encoding)).toBe(true);
+      if (descriptor.encoding !== null) {
+        expect(Object.isFrozen(descriptor.encoding)).toBe(true);
+      }
       expect(Object.isFrozen(descriptor.preset)).toBe(true);
-      if ('transform' in descriptor.encoding) {
+      if (descriptor.encoding !== null && 'transform' in descriptor.encoding) {
         expect(Object.isFrozen(descriptor.encoding.transform)).toBe(true);
       }
       if (descriptor.constraints.sampleRate.kind === 'discrete') {
@@ -217,6 +313,40 @@ describe('stream output presets', () => {
           ).toBe(false);
         }
       }
+    }
+  });
+
+  it('enforces exact AAC and Ogg Opus channel-rate matrices', () => {
+    for (const descriptor of AAC_OUTPUT_PRESET_DESCRIPTORS) {
+      for (const sampleRate of AAC_OUTPUT_SAMPLE_RATES) {
+        expect(isStreamOutputConfigurationSupported(descriptor, 1, sampleRate)).toBe(
+          true,
+        );
+        expect(isStreamOutputConfigurationSupported(descriptor, 2, sampleRate)).toBe(
+          true,
+        );
+      }
+      expect(isStreamOutputConfigurationSupported(descriptor, 3, 48_000)).toBe(
+        false,
+      );
+      expect(isStreamOutputConfigurationSupported(descriptor, 2, 24_000)).toBe(
+        false,
+      );
+    }
+
+    for (const descriptor of OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS) {
+      expect(isStreamOutputConfigurationSupported(descriptor, 1, 48_000)).toBe(
+        true,
+      );
+      expect(isStreamOutputConfigurationSupported(descriptor, 2, 48_000)).toBe(
+        true,
+      );
+      expect(isStreamOutputConfigurationSupported(descriptor, 3, 48_000)).toBe(
+        false,
+      );
+      expect(isStreamOutputConfigurationSupported(descriptor, 2, 44_100)).toBe(
+        false,
+      );
     }
   });
 

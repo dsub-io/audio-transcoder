@@ -3,7 +3,8 @@
 Browser-local audio inspection and transcoding engine for dsub tools. The
 package makes no media-upload requests: codec work runs in module Web Workers,
 and files stay on the user's device unless the consumer application sends them
-elsewhere.
+elsewhere. Lazy raw WebAssembly is fetched only from the asset source that the
+host application explicitly configures; the package never selects a CDN.
 
 > Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
 > Commercial use is not permitted by this package license.
@@ -21,13 +22,23 @@ is usable.
 
 ```ts
 import {
+  AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST,
   createAudioTranscoderOutputSession,
   createAudioTranscoderStreamWorkerPool,
+  createSelfHostedRuntimeAssetSource,
   type AudioStreamTarget,
   type AudioTranscoderOutputArtifact,
 } from '@dsub/audio-transcoder';
 
 const pool = createAudioTranscoderStreamWorkerPool({
+  codecAssets: {
+    source: createSelfHostedRuntimeAssetSource(
+      `/audio-transcoder-codecs/${AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version}`,
+    ),
+    onStateChange: ({ assetName, phase, loadedBytes, totalBytes }) => {
+      console.log({ assetName, phase, loadedBytes, totalBytes });
+    },
+  },
   concurrency: 1,
   maxQueued: 8,
 });
@@ -127,6 +138,66 @@ object URL and dispose its artifact when removing the link; then await
 `disposeAudioTool()` when the tool route unmounts. Framework and `pagehide`
 ownership are covered in [Browser integration](docs/integration.md).
 
+## Runtime codec assets
+
+The default stream Worker requires an explicit `codecAssets.source`. WAV and
+AIFF use eager JavaScript and do not fetch a codec asset. Selecting or probing
+AAC, Ogg Opus, MP3, or FLAC fetches that codec's raw `.wasm`; a sample-rate
+change fetches only the selected `fast`, `balanced`, or `best` resampler. These
+bytes execute directly in the existing module Worker. They are not embedded in
+the engine package and do not create a nested or Blob Worker.
+
+`@dsub/audio-transcoder-codecs` and `@dsub/audio-transcoder` use the same exact
+package version. The convenience helper is an explicit jsDelivr opt-in:
+
+```ts
+import {
+  createAudioTranscoderJsDelivrAssetSource,
+  createAudioTranscoderStreamWorkerPool,
+} from '@dsub/audio-transcoder';
+
+const pool = createAudioTranscoderStreamWorkerPool({
+  codecAssets: {
+    // This call is the application's explicit decision to use jsDelivr.
+    source: createAudioTranscoderJsDelivrAssetSource(),
+  },
+});
+```
+
+The helper always resolves the engine's baked exact version. For example, an
+engine at `1.2.3` resolves AAC to
+`https://cdn.jsdelivr.net/npm/@dsub/audio-transcoder-codecs@1.2.3/wasm/aac.wasm`;
+it never uses `latest`, a dist-tag, or a SemVer range. This URL is an example of
+the versioned contract, not a claim that an illustrative version is published.
+Every released codec package maps to the public Git tag with the same version;
+that tag contains the exact modified source, build/relink scripts, manifests,
+notices, and upstream archive URLs and hashes described in
+[`codec-assets/README.md`](codec-assets/README.md).
+
+Self-hosting is equally explicit. A primary source and its fallbacks are tried
+sequentially in the configured order, never raced:
+
+```ts
+const version = AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version;
+const pool = createAudioTranscoderStreamWorkerPool({
+  codecAssets: {
+    source: createSelfHostedRuntimeAssetSource(
+      `https://assets.example.com/audio-transcoder/${version}`,
+    ),
+    fallbackSources: [createAudioTranscoderJsDelivrAssetSource()],
+    onStateChange: (state) => console.log(state),
+  },
+});
+```
+
+Every fallback must serve the same stable paths and exact bytes. Before any
+bytes are used, the runtime validates manifest schema and ABI compatibility,
+then checks the decoded raw response size and SHA-256 against the manifest baked
+into the engine. The state model begins at `idle`; `onStateChange` emits
+`downloading`, `verifying`, `ready`, or final `error` transitions. With
+compressed HTTP transfer, `totalBytes` can be `null` because `Content-Length`
+may describe transport bytes while integrity covers the decoded raw WASM.
+
 ## Development
 
 ```sh
@@ -178,23 +249,39 @@ can stall, so UI probes should compose their lifecycle `AbortSignal` with an
 application deadline. Treat a rejected or aborted probe as retryable rather
 than permanently disabling the input format.
 
+Every built-in inspection also exposes structured `sourceEncoding`. Use it
+instead of parsing the human-readable `codec` field. PCM sources identify
+integer versus float representation, bit depth, signedness, and endianness;
+compressed sources identify lossless/lossy codec metadata when available.
+This lets a consumer render, for example, `32-bit float` and `32-bit signed
+integer` as distinct source formats.
+
 ### Output capabilities and runtime probing
 
-`getCapabilities().outputFormats` is the immutable candidate manifest bundled
-with the package. It describes installed presets and their static constraints;
+`getCapabilities().outputFormats` is the immutable candidate manifest declared
+by the package. It describes installed presets and their static constraints;
 it does not prove that the current browser can initialize every codec runtime.
+`implementation: 'runtime-asset'` means the encoder bytes are delivered
+separately through the application's explicit asset provider, never bundled in
+the core Worker.
 The current manifest contains:
 
 | Format | Preset IDs | Implementation | Channels | Encoder target sample rates |
 | --- | --- | --- | ---: | --- |
 | WAV | `wav-pcm16`, `wav-pcm24`, `wav-pcm32`, `wav-float32` | Built in, eager | 1-32 | 8,000-384,000 Hz |
-| MP3 | `mp3-128kbps` | Bundled WASM, lazy | 1-2 | 16,000, 22,050, 24,000, 32,000, 44,100, or 48,000 Hz |
-| MP3 | `mp3-192kbps`, `mp3-256kbps`, `mp3-320kbps` | Bundled WASM, lazy | 1-2 | 32,000, 44,100, or 48,000 Hz |
-| FLAC | `flac-16bit`, `flac-24bit` | Bundled WASM, lazy | 1-8 | 8,000, 16,000, 22,050, 24,000, 32,000, 44,100, 48,000, 88,200, 96,000, 176,400, or 192,000 Hz |
+| AIFF | `aiff-pcm16`, `aiff-pcm24` | Built in, eager | 1-32 | 8,000-384,000 Hz |
+| AAC-LC (ADTS) | `aac-96kbps`, `aac-128kbps`, `aac-192kbps`, `aac-256kbps` | External raw WASM, lazy | 1-2 | 32,000, 44,100, or 48,000 Hz |
+| Ogg Opus | `ogg-opus-64kbps`, `ogg-opus-96kbps`, `ogg-opus-128kbps`, `ogg-opus-192kbps` | External raw WASM, lazy | 1-2 | 48,000 Hz |
+| MP3 | `mp3-128kbps` | External raw WASM, lazy | 1-2 | 16,000, 22,050, 24,000, 32,000, 44,100, or 48,000 Hz |
+| MP3 | `mp3-192kbps`, `mp3-256kbps`, `mp3-320kbps` | External raw WASM, lazy | 1-2 | 32,000, 44,100, or 48,000 Hz |
+| FLAC | `flac-16bit`, `flac-24bit` | External raw WASM, lazy | 1-8 | 8,000, 16,000, 22,050, 24,000, 32,000, 44,100, 48,000, 88,200, 96,000, 176,400, or 192,000 Hz |
 
-Do not copy this table into application logic. Build controls from
-`outputFormats`, apply each preset's channel and sample-rate constraints
-synchronously, then call `probeOutputSupport()` for the exact explicit target.
+Do not copy this table into application logic. Build format-specific controls
+with `getAudioStreamOutputParameters()`: WAV exposes sample format and bit
+depth, AIFF/FLAC expose bit depth, and AAC/Ogg Opus/MP3 expose bitrate. Pass the
+semantic selection and inspected source to `resolveAudioStreamFormatTarget()`
+to obtain the exact source-preserving target and probe target. Then call
+`probeOutputSupport()` for that exact target.
 Render `checking` while it runs and enable conversion only for `supported`.
 Gray or omit explicit `unsupported-configuration` and `runtime-unavailable`
 results. A rejected Promise is a retryable operation, resource, queue,
@@ -214,13 +301,24 @@ with `probeOutputSupport()`. Device hints may tune queue or concurrency only
 after measurement; the default and recommended concurrency is `1`.
 
 Probe the selected exact target first. Preflight other offered exact targets
-sequentially and apply each verdict only to that target. MP3 or FLAC probing
-intentionally downloads its lazy codec chunk, so defer those probes for a
-smaller initial transfer. Never start every probe concurrently. See
+sequentially and apply each verdict only to that target. Probing AAC, Ogg Opus,
+MP3, or FLAC intentionally downloads that format's raw codec asset, so defer
+those probes for a smaller initial transfer. Never start every probe
+concurrently. See
 [Browser integration](docs/integration.md#capability-driven-controls) for the
 full UI and framework lifecycle guidance.
 
-Lower-rate MP3 combinations are intentionally absent. LAME can silently encode
+`loading: 'lazy'` describes asset ownership; it is not an engine-wide live
+loading flag. Set the selected control to `checking` before awaiting
+`probeOutputSupport()`, and set a job to `preparing` before calling
+`transcode()`. Those host states cover Worker startup, dynamic import, WASM
+compilation, and codec initialization before the first package progress event.
+There is deliberately no eager `ready()` call that downloads every codec.
+
+Ogg Opus always encodes at its 48 kHz codec clock. A 48 kHz source can keep the
+source rate; any other supported source must select 48 kHz explicitly so the
+resolver and runtime make resampling visible. Lower-rate MP3 combinations are
+intentionally absent. LAME can silently encode
 some requested high-bitrate, low-sample-rate combinations at a lower bitrate;
 the public presets reject those combinations instead of misreporting the
 result. Always use each preset's exact discrete rate array.
@@ -280,6 +378,13 @@ output and abort it if admission, queued cancellation, disposal, or Worker
 startup fails. Pass the same `AbortSignal` to `schedule()`, probing, and
 transcoding.
 
+The destination remains abortable through encoder finalization and, on the
+Worker path, until both Worker-side output completion and the success result
+arrive. The final destination `close()` call is the explicit irreversible
+commit point. Cancellation or disposal requested after that call starts waits
+for its success or failure instead of reporting an abort for output that may
+already have committed.
+
 When running work rejects with `OPERATION_ABORTED`, the pool terminates that
 Worker before reusing the slot, so a stalled native decoder cannot accumulate
 across retries. Inside `schedule()`, discard owned output and rethrow the abort.
@@ -288,8 +393,8 @@ before creating a replacement and retrying.
 
 `inputReadBytes`, `pcmChunkBytes`, and `outputChunkBytes` bound one source read,
 decoded PCM yield, and encoded output chunk. They are not total heap limits.
-MediaBunny caches, browser decoder state, Workers, nested codec Workers, WASM
-heaps, source `Blob` objects, and output storage consume additional memory.
+MediaBunny caches, browser decoder state, the module Worker, WASM heaps, source
+`Blob` objects, and output storage consume additional memory.
 Browsers provide neither portable forced garbage collection nor a reliable
 available-memory budget.
 
@@ -298,23 +403,24 @@ writer-lock release must be complete before removing OPFS entries. `terminate()`
 remains a fire-and-forget compatibility method and is not an awaited cleanup
 barrier.
 
-### Lazy codec and resampler chunks
+### Lazy codec assets and resamplers
 
-WAV encoding is built in and loads eagerly. MP3 and FLAC use the official
-[MediaBunny MP3 encoder](https://mediabunny.dev/guide/extensions/mp3-encoder)
-and [MediaBunny FLAC encoder](https://mediabunny.dev/guide/extensions/flac-encoder).
-Each extension is dynamically imported and registered inside the codec Worker
-only when one of its presets is first selected. The extension code, nested Blob
-Worker, and WASM payload are bundled with the application; there is no CDN fetch
-or server-side media processing.
+WAV and AIFF encoding are built in and load eagerly. AAC-LC uses a pinned
+minimal FFmpeg build, Ogg Opus uses pinned libopusenc/libopus/libogg, MP3 uses
+pinned LAME, and FLAC uses pinned libFLAC. Their bridges load raw WASM from the
+application's required `codecAssets` configuration only when a matching preset
+is first selected or probed. The runtime has no implicit CDN, embedded WASM
+payload, nested Worker, or server-side media processing path.
 
-Sample-rate conversion uses `@alexanderolsen/libsamplerate-js`, whose current
-distribution is an asm.js payload. It is also a separate dynamic import: a job
-whose target sample rate equals its source rate does not load the resampler
-chunk.
+Sample-rate conversion uses three package-owned libsamplerate WASM modules, one
+for each existing `best`, `balanced`, and `fast` quality contract. A conversion
+loads only the selected module. `best` retains libsamplerate's complete
+highest-quality sinc coefficient table; no coefficient, passband, or supported
+rate/channel range is reduced to save bytes. A job whose target sample rate
+equals its source rate takes the pass-through path and loads no resampler.
 
-Vite production builds must preserve the Worker as an ES module for those
-dynamic imports to remain separate network chunks:
+Vite production builds must preserve the Worker as an ES module so lazy
+JavaScript glue remains split from the initial Worker:
 
 ```ts
 import { defineConfig } from 'vite';
@@ -324,23 +430,29 @@ export default defineConfig({
 });
 ```
 
-Without `worker.format: 'es'`, Vite's IIFE Worker output can inline the lazy
-encoder and resampler modules. Encoding remains functional, but those payloads
-increase the initial Worker resource cost.
+Without `worker.format: 'es'`, Vite's IIFE Worker output can inline lazy
+JavaScript glue. Raw WASM still comes from the explicitly configured asset
+source, but the initial Worker resource can grow.
 
-For strict CSP, the core WAV path needs the same-origin module Worker. MP3/FLAC
-extension use additionally needs a Blob Worker and WebAssembly compilation:
+For strict CSP, the module Worker needs `worker-src 'self'` and raw WASM needs
+WebAssembly compilation. Fetches from a same-origin asset path need
+`connect-src 'self'`; explicit jsDelivr use additionally needs
+`connect-src https://cdn.jsdelivr.net`:
 
 ```http
 Content-Security-Policy:
   script-src 'self' 'wasm-unsafe-eval';
-  worker-src 'self' blob:
+  worker-src 'self';
+  connect-src 'self' https://cdn.jsdelivr.net
 ```
 
 See MDN's [`worker-src`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/worker-src)
 and [`script-src`](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Content-Security-Policy/script-src)
-references. `blob:` and `'wasm-unsafe-eval'` are needed for the bundled MP3/FLAC
-extensions, not for built-in WAV encoding.
+references. Remove the jsDelivr origin when all assets are same-origin; include
+every configured cross-origin fallback in `connect-src`. A cross-origin asset
+host must allow CORS. Serve `.wasm` as `application/wasm` and enable HTTP gzip
+or Brotli as transport compression. The CDN or asset host sees only asset
+requests; input audio remains local unless the application uploads it.
 
 ## Whole-buffer API
 
@@ -355,8 +467,9 @@ Built-in capabilities are:
 - PCM encode: WAV integer 16/24/32-bit and WAV float32; AIFF integer 16/24-bit.
 - Transcode: a built-in PCM decoder followed by a built-in encoder.
 
-The official streaming MP3/FLAC extensions do not change the whole-buffer
-plugin boundary. Whole-buffer FLAC or MP3 decode/encode still requires a plugin.
+The streaming AAC/Ogg Opus/MP3/FLAC encoders do not change the whole-buffer
+plugin boundary. Whole-buffer encoding for those formats still requires a
+plugin.
 
 Whole-buffer operations use a 64 MiB safety guard and fail with
 `RESOURCE_LIMIT_EXCEEDED`. Built-in WAV, AIFF/AIFC, and CAF decoders estimate
@@ -407,6 +520,19 @@ Release Please owns semantic versioning, changelog updates, GitHub releases, and
 package version changes. Runtime consumers can use `audioTranscoder.getVersion()`,
 `getVersion()`, or `AUDIO_TRANSCODER_VERSION`.
 
+The engine and `@dsub/audio-transcoder-codecs` are a lockstep pair: both must
+carry the exact Release Please version, and the engine embeds that asset
+manifest/version. Release order is Release Please version generation, build
+and verify the codec asset package from that tag, manually publish the codec
+asset package, verify every stable versioned jsDelivr URL and raw size/SHA-256,
+then manually publish the engine.
+The Release workflow intentionally stops after Release Please; it does not
+publish either npm package. The engine's `prepublishOnly` gate performs the
+jsDelivr verification and refuses publication until the exact asset package,
+all seven raw WASM files, and the audited notice/license payload are available
+byte-for-byte. Do not use `--ignore-scripts`, create manual tags, or edit
+versions around Release Please.
+
 ## License
 
 Required Notice: Copyright 2026 dsub.io. All rights reserved.
@@ -414,8 +540,10 @@ Required Notice: Copyright 2026 dsub.io. All rights reserved.
 This software is source-available under the
 [PolyForm Noncommercial License 1.0.0](LICENSE.md). Use, modification, and
 redistribution are permitted only for noncommercial purposes. Commercial use is
-prohibited. Bundled dependency notices are in
+prohibited. Third-party dependency notices are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), with complete license texts
-in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES). Web distributors should ship
-those files with production bundles and follow the source/build checklist in
-the notice.
+in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES) and source/build materials under
+`codec-build/` and `vendor/`. Released binaries identify their corresponding
+source by the public Git tag matching the package version. Web distributors
+should retain the required notices and that exact source/relink reference for
+the raw assets they deploy.

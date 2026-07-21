@@ -1,10 +1,41 @@
 import { expect, test, type BrowserContext } from '@playwright/test';
 
+const unexpectedExternalRequests = new WeakMap<BrowserContext, string[]>();
+
+test.beforeEach(async ({ context }) => {
+  const blocked: string[] = [];
+  unexpectedExternalRequests.set(context, blocked);
+  await context.route(
+    /^https?:\/\/(?!127\.0\.0\.1(?::\d+)?(?:\/|$))/i,
+    async (route) => {
+      blocked.push(route.request().url());
+      await route.abort('blockedbyclient');
+    },
+  );
+});
+
+test.afterEach(async ({ context }) => {
+  expect(
+    unexpectedExternalRequests.get(context) ?? [],
+    'The browser matrix must use only the local Vite server.',
+  ).toEqual([]);
+});
+
 const EXPECTED_OUTPUTS = [
   { bitDepth: 16, format: 'wav', formatTag: 1, presetId: 'wav-pcm16' },
   { bitDepth: 24, format: 'wav', formatTag: 1, presetId: 'wav-pcm24' },
   { bitDepth: 32, format: 'wav', formatTag: 1, presetId: 'wav-pcm32' },
   { bitDepth: 32, format: 'wav', formatTag: 3, presetId: 'wav-float32' },
+  { bitDepth: 16, format: 'aiff', presetId: 'aiff-pcm16' },
+  { bitDepth: 24, format: 'aiff', presetId: 'aiff-pcm24' },
+  { format: 'aac', presetId: 'aac-96kbps' },
+  { format: 'aac', presetId: 'aac-128kbps' },
+  { format: 'aac', presetId: 'aac-192kbps' },
+  { format: 'aac', presetId: 'aac-256kbps' },
+  { format: 'ogg', presetId: 'ogg-opus-64kbps', sampleRate: 48_000 },
+  { format: 'ogg', presetId: 'ogg-opus-96kbps', sampleRate: 48_000 },
+  { format: 'ogg', presetId: 'ogg-opus-128kbps', sampleRate: 48_000 },
+  { format: 'ogg', presetId: 'ogg-opus-192kbps', sampleRate: 48_000 },
   { bitrate: 128_000, format: 'mp3', presetId: 'mp3-128kbps' },
   { bitrate: 192_000, format: 'mp3', presetId: 'mp3-192kbps' },
   { bitrate: 256_000, format: 'mp3', presetId: 'mp3-256kbps' },
@@ -38,7 +69,7 @@ test('runs every advertised output preset in a real Worker', async ({ page }) =>
     expect(result.closedBeforeResolved).toBe(true);
     expect(result.maxChunkBytes).toBeLessThanOrEqual(64 * 1024);
     expect(result.maxChunkBytes).toBeGreaterThan(0);
-    expect(result.sampleRate).toBe(44_100);
+    expect(result.sampleRate).toBe('sampleRate' in expected ? expected.sampleRate : 44_100);
     expect(result.writes).toBeGreaterThan(0);
     expectProgress(result.progress);
 
@@ -49,6 +80,43 @@ test('runs every advertised output preset in a real Worker', async ({ page }) =>
       expect(result.bitrate).toBeNull();
       expect(result.mp3Frames).toBeNull();
       expect(result.flacTotalSamples).toBeNull();
+    } else if (expected.format === 'aiff') {
+      expect(result.bitDepth).toBe(expected.bitDepth);
+      expect(result.aiffFrames).toBe(result.expectedTotalSamples);
+      expect(result.aiffFormBytes).toBe(result.finalSize - 8);
+      expect(result.aiffSoundBytes).toBe(
+        8 +
+          result.expectedTotalSamples *
+            result.channels *
+            (expected.bitDepth / 8),
+      );
+      expect(result.bitrate).toBeNull();
+      expect(result.formatTag).toBeNull();
+      expect(result.mp3Frames).toBeNull();
+      expect(result.flacTotalSamples).toBeNull();
+      expect(result.resultRf64).toBeNull();
+    } else if (expected.format === 'aac') {
+      expect(result.aacObjectType).toBe(2);
+      expect(result.aacFrames).toBeGreaterThan(0);
+      expect((result.aacFrames ?? 0) * 1_024).toBeGreaterThanOrEqual(
+        result.expectedTotalSamples,
+      );
+      expect(result.bitDepth).toBeNull();
+      expect(result.bitrate).toBeNull();
+      expect(result.formatTag).toBeNull();
+      expect(result.resultRf64).toBeNull();
+    } else if (expected.format === 'ogg') {
+      expect(result.oggEos).toBe(true);
+      expect(result.oggPages).toBeGreaterThanOrEqual(3);
+      expect(result.oggPreSkip).toBe(312);
+      expect(result.oggFinalGranule).toBe(
+        (result.oggPreSkip ?? 0) + result.expectedTotalSamples,
+      );
+      expect(result.oggSerial).toBe(0x4453_5542);
+      expect(result.bitDepth).toBeNull();
+      expect(result.bitrate).toBeNull();
+      expect(result.formatTag).toBeNull();
+      expect(result.resultRf64).toBeNull();
     } else if (expected.format === 'mp3') {
       expect(
         result.bitrate,
@@ -262,6 +330,155 @@ test('encodes WAV preset, rate, and channel boundaries and rejects outside them 
   );
 });
 
+test('encodes AIFF preset, rate, and channel boundaries and rejects outside them early', async ({
+  page,
+}) => {
+  await page.goto('/test/browser/');
+  const result = await page.evaluate(() => window.runAiffConstraintMatrix());
+  const presets = [
+    { bitDepth: 16, presetId: 'aiff-pcm16' },
+    { bitDepth: 24, presetId: 'aiff-pcm24' },
+  ] as const;
+  const expected = presets.flatMap(({ presetId }) =>
+    [8_000, 384_000].flatMap((sampleRate) =>
+      [1, 32].map((channels) => ({ channels, presetId, sampleRate })),
+    ),
+  );
+  expect(
+    result.accepted.map(({ channels, presetId, sampleRate }) => ({
+      channels,
+      presetId,
+      sampleRate,
+    })),
+  ).toEqual(expected);
+  for (const encoded of result.accepted) {
+    const preset = presets.find(({ presetId }) => presetId === encoded.presetId)!;
+    expect(encoded.format).toBe('aiff');
+    expect(encoded.bitDepth).toBe(preset.bitDepth);
+    expect(encoded.aiffFrames).toBe(1_024);
+    expect(encoded.aiffFormBytes).toBe(encoded.finalSize - 8);
+    expect(encoded.aiffSoundBytes).toBe(
+      8 + 1_024 * encoded.channels * (preset.bitDepth / 8),
+    );
+    expect(encoded.bytesWritten).toBe(encoded.finalSize);
+    expect(encoded.closedBeforeResolved).toBe(true);
+    expect(encoded.writes).toBeGreaterThan(0);
+    expectProgress(encoded.progress);
+  }
+  expect(result.invalid).toEqual(
+    presets.flatMap(({ presetId }) => [
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 7_999, writes: 0 },
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 384_001, writes: 0 },
+      { channels: 0, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 8_000, writes: 0 },
+      { channels: 33, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 8_000, writes: 0 },
+    ]),
+  );
+});
+
+test('encodes the exact AAC preset-rate-channel matrix and rejects invalid targets before loading AAC', async ({
+  page,
+}) => {
+  await page.goto('/test/browser/');
+  const result = await page.evaluate(() => window.runAacConstraintMatrix());
+  const presets = [
+    'aac-96kbps',
+    'aac-128kbps',
+    'aac-192kbps',
+    'aac-256kbps',
+  ] as const;
+  const sampleRates = [32_000, 44_100, 48_000] as const;
+  const expected = presets.flatMap((presetId) =>
+    sampleRates.flatMap((sampleRate) =>
+      [1, 2].map((channels) => ({ channels, presetId, sampleRate })),
+    ),
+  );
+
+  expect(
+    result.accepted.map(({ channels, presetId, sampleRate }) => ({
+      channels,
+      presetId,
+      sampleRate,
+    })),
+  ).toEqual(expected);
+  for (const encoded of result.accepted) {
+    expect(encoded.format).toBe('aac');
+    expect(encoded.aacObjectType).toBe(2);
+    expect(encoded.aacFrames).toBeGreaterThan(0);
+    expect((encoded.aacFrames ?? 0) * 1_024).toBeGreaterThanOrEqual(2_057);
+    expect(encoded.bytesWritten).toBe(encoded.finalSize);
+    expect(encoded.closedBeforeResolved).toBe(true);
+    expect(encoded.writes).toBeGreaterThan(0);
+    expectProgress(encoded.progress);
+  }
+  expect(result.invalid).toEqual(
+    presets.flatMap((presetId) => [
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 31_999, writes: 0 },
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 48_001, writes: 0 },
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 24_000, writes: 0 },
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 40_000, writes: 0 },
+      { channels: 0, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 32_000, writes: 0 },
+      { channels: 3, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 32_000, writes: 0 },
+    ]),
+  );
+  expect(
+    result.resourcesBeforeAcceptedEncoding
+      .map(classifyCodecRequest)
+      .filter(isCodecName),
+  ).toEqual([]);
+});
+
+test('encodes the exact Ogg Opus preset-channel matrix and rejects non-48k targets before loading Opus', async ({
+  page,
+}) => {
+  await page.goto('/test/browser/');
+  const result = await page.evaluate(() => window.runOggOpusConstraintMatrix());
+  const presets = [
+    'ogg-opus-64kbps',
+    'ogg-opus-96kbps',
+    'ogg-opus-128kbps',
+    'ogg-opus-192kbps',
+  ] as const;
+  const expected = presets.flatMap((presetId) =>
+    [1, 2].map((channels) => ({ channels, presetId, sampleRate: 48_000 })),
+  );
+
+  expect(
+    result.accepted.map(({ channels, presetId, sampleRate }) => ({
+      channels,
+      presetId,
+      sampleRate,
+    })),
+  ).toEqual(expected);
+  for (const encoded of result.accepted) {
+    expect(encoded.format).toBe('ogg');
+    expect(encoded.oggEos).toBe(true);
+    expect(encoded.oggPages).toBeGreaterThanOrEqual(3);
+    expect(encoded.oggPreSkip).toBe(312);
+    expect(encoded.oggFinalGranule).toBe(
+      (encoded.oggPreSkip ?? 0) + encoded.expectedTotalSamples,
+    );
+    expect(encoded.oggSerial).toBe(0x4453_5542);
+    expect(encoded.bytesWritten).toBe(encoded.finalSize);
+    expect(encoded.closedBeforeResolved).toBe(true);
+    expect(encoded.writes).toBeGreaterThan(0);
+    expectProgress(encoded.progress);
+  }
+  expect(result.invalid).toEqual(
+    presets.flatMap((presetId) => [
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 47_999, writes: 0 },
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 48_001, writes: 0 },
+      { channels: 1, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 44_100, writes: 0 },
+      { channels: 0, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 48_000, writes: 0 },
+      { channels: 3, errorCode: 'UNSUPPORTED_OUTPUT', presetId, sampleRate: 48_000, writes: 0 },
+    ]),
+  );
+  expect(
+    result.resourcesBeforeAcceptedEncoding
+      .map(classifyCodecRequest)
+      .filter(isCodecName),
+  ).toEqual([]);
+});
+
 test('enforces the FLAC probe budget and gates transcode on a responsive probe', async ({
   page,
 }) => {
@@ -345,19 +562,51 @@ test('probes output support in a real Worker without creating output artifacts',
     code: 'UNSUPPORTED_OUTPUT',
     status: 'unsupported-configuration',
   });
+  expect(result.invalidAac).toEqual({
+    code: 'UNSUPPORTED_OUTPUT',
+    status: 'unsupported-configuration',
+  });
+  expect(result.invalidOgg).toEqual({
+    code: 'UNSUPPORTED_OUTPUT',
+    status: 'unsupported-configuration',
+  });
   expect(result.wav).toEqual({ code: 'SUPPORTED', status: 'supported' });
+  expect(result.aiff).toEqual({ code: 'SUPPORTED', status: 'supported' });
+  expect(result.aac).toEqual({ code: 'SUPPORTED', status: 'supported' });
+  expect(result.ogg).toEqual({ code: 'SUPPORTED', status: 'supported' });
   expect(result.mp3).toEqual({ code: 'SUPPORTED', status: 'supported' });
   expect(result.flac).toEqual({ code: 'SUPPORTED', status: 'supported' });
   expect(codecAssets(result.resourcesAfterInvalidMp3)).toEqual([]);
+  expect(codecAssets(result.resourcesAfterInvalidAac)).toEqual([]);
+  expect(codecAssets(result.resourcesAfterInvalidOgg)).toEqual([]);
   expect(codecAssets(result.resourcesAfterWav)).toEqual([]);
-  expect(codecAssets(result.resourcesAfterMp3)).toEqual(['mp3']);
-  expect(codecAssets(result.resourcesAfterFlac)).toEqual(['flac', 'mp3']);
+  expect(codecAssets(result.resourcesAfterAiff)).toEqual([]);
+  expect(codecAssets(result.resourcesAfterAac)).toEqual(['aac']);
+  expect(codecAssets(result.resourcesAfterOgg)).toEqual(['aac', 'ogg-opus']);
+  expect(codecAssets(result.resourcesAfterMp3)).toEqual([
+    'aac',
+    'mp3',
+    'ogg-opus',
+  ]);
+  expect(codecAssets(result.resourcesAfterFlac)).toEqual([
+    'aac',
+    'flac',
+    'mp3',
+    'ogg-opus',
+  ]);
   expect(result.outputArtifactsCreated).toBe(0);
   expect(result.disposed).toBe(true);
 });
 
 for (const scenario of [
   { expectedAssets: [] as const, format: 'wav', presetId: 'wav-pcm16' },
+  { expectedAssets: [] as const, format: 'aiff', presetId: 'aiff-pcm16' },
+  { expectedAssets: ['aac'] as const, format: 'aac', presetId: 'aac-128kbps' },
+  {
+    expectedAssets: ['ogg-opus'] as const,
+    format: 'ogg',
+    presetId: 'ogg-opus-128kbps',
+  },
   { expectedAssets: ['mp3'] as const, format: 'mp3', presetId: 'mp3-128kbps' },
   { expectedAssets: ['flac'] as const, format: 'flac', presetId: 'flac-16bit' },
 ] as const) {
@@ -368,8 +617,8 @@ for (const scenario of [
     const requests = observeRequests(context);
     await page.goto('/test/browser/');
     const result = await page.evaluate(
-      (presetId) => window.runSingleOutputPreset(presetId),
-      scenario.presetId,
+      ({ presetId }) => window.runSingleOutputPreset(presetId),
+      scenario,
     );
     const observedResources = [...requests, ...result.workerResources];
     const codecAssets = [
@@ -534,17 +783,28 @@ function observeRequests(context: BrowserContext): string[] {
   return requests;
 }
 
-function classifyCodecRequest(url: string): 'flac' | 'mp3' | null {
-  const normalized = url.toLowerCase();
-  if (normalized.includes('mediabunny') && normalized.includes('flac-encoder')) {
+type CodecName = 'aac' | 'flac' | 'mp3' | 'ogg-opus' | 'resampler';
+
+function classifyCodecRequest(url: string): CodecName | null {
+  const normalized = decodeURIComponent(new URL(url).pathname).toLowerCase();
+  if (normalized.endsWith('/wasm/aac.wasm')) {
+    return 'aac';
+  }
+  if (normalized.endsWith('/wasm/ogg-opus.wasm')) {
+    return 'ogg-opus';
+  }
+  if (/\/wasm\/resampler-(?:fast|balanced|best)\.wasm$/.test(normalized)) {
+    return 'resampler';
+  }
+  if (normalized.endsWith('/wasm/flac.wasm')) {
     return 'flac';
   }
-  if (normalized.includes('mediabunny') && normalized.includes('mp3-encoder')) {
+  if (normalized.endsWith('/wasm/mp3.wasm')) {
     return 'mp3';
   }
   return null;
 }
 
-function isCodecName(value: 'flac' | 'mp3' | null): value is 'flac' | 'mp3' {
+function isCodecName(value: CodecName | null): value is CodecName {
   return value !== null;
 }

@@ -5,7 +5,7 @@ import {
   AUDIO_STREAM_OUTPUT_FORMATS,
   AUDIO_TRANSCODER_STREAM_CAPABILITIES,
   type AudioStreamBuiltInOutputFormatDescriptor,
-  type AudioStreamBundledWasmOutputFormatDescriptor,
+  type AudioStreamRuntimeAssetOutputFormatDescriptor,
   type AudioStreamInputFormatId,
   type AudioStreamLosslessOutputPresetDescriptor,
   type AudioStreamLossyOutputPresetDescriptor,
@@ -56,7 +56,7 @@ describe('stream capability discovery', () => {
     >();
   });
 
-  it('exposes deterministic built-in and bundled-WASM outputs', () => {
+  it('exposes deterministic built-in and runtime-asset outputs', () => {
     expect(
       AUDIO_STREAM_OUTPUT_FORMATS.map(
         ({ id, implementation, loading, requiresSeekableOutput }) => ({
@@ -74,14 +74,32 @@ describe('stream capability discovery', () => {
         requiresSeekableOutput: true,
       },
       {
+        id: 'aiff',
+        implementation: 'built-in',
+        loading: 'eager',
+        requiresSeekableOutput: true,
+      },
+      {
+        id: 'aac',
+        implementation: 'runtime-asset',
+        loading: 'lazy',
+        requiresSeekableOutput: false,
+      },
+      {
+        id: 'ogg',
+        implementation: 'runtime-asset',
+        loading: 'lazy',
+        requiresSeekableOutput: false,
+      },
+      {
         id: 'mp3',
-        implementation: 'bundled-wasm',
+        implementation: 'runtime-asset',
         loading: 'lazy',
         requiresSeekableOutput: true,
       },
       {
         id: 'flac',
-        implementation: 'bundled-wasm',
+        implementation: 'runtime-asset',
         loading: 'lazy',
         requiresSeekableOutput: true,
       },
@@ -130,6 +148,61 @@ describe('stream capability discovery', () => {
     ]);
     expect(
       AUDIO_STREAM_OUTPUT_FORMATS[1].presets.map(
+        ({ bitDepth, codec, processingPrecision }) => ({
+          bitDepth,
+          codec,
+          processingPrecision,
+        }),
+      ),
+    ).toEqual([
+      {
+        bitDepth: 16,
+        codec: 'pcm-s16be',
+        processingPrecision: {
+          effectiveIntegerPrecisionBits: 16,
+          sampleFormat: 'float32',
+        },
+      },
+      {
+        bitDepth: 24,
+        codec: 'pcm-s24be',
+        processingPrecision: {
+          effectiveIntegerPrecisionBits: 24,
+          sampleFormat: 'float32',
+        },
+      },
+    ]);
+    expect(AUDIO_STREAM_OUTPUT_FORMATS[1]).toMatchObject({
+      container: 'aiff',
+      extension: 'aiff',
+      mimeType: 'audio/aiff',
+      presets: [
+        { preset: { id: 'aiff-pcm16' } },
+        { preset: { id: 'aiff-pcm24' } },
+      ],
+    });
+    expect(
+      AUDIO_STREAM_OUTPUT_FORMATS[2].presets.map(
+        ({ bitrate, preset }) => [preset.id, bitrate],
+      ),
+    ).toEqual([
+      ['aac-96kbps', 96_000],
+      ['aac-128kbps', 128_000],
+      ['aac-192kbps', 192_000],
+      ['aac-256kbps', 256_000],
+    ]);
+    expect(
+      AUDIO_STREAM_OUTPUT_FORMATS[3].presets.map(
+        ({ bitrate, preset }) => [preset.id, bitrate],
+      ),
+    ).toEqual([
+      ['ogg-opus-64kbps', 64_000],
+      ['ogg-opus-96kbps', 96_000],
+      ['ogg-opus-128kbps', 128_000],
+      ['ogg-opus-192kbps', 192_000],
+    ]);
+    expect(
+      AUDIO_STREAM_OUTPUT_FORMATS[4].presets.map(
         ({ bitrate, preset }) => [preset.id, bitrate],
       ),
     ).toEqual([
@@ -139,7 +212,7 @@ describe('stream capability discovery', () => {
       ['mp3-320kbps', 320_000],
     ]);
     expect(
-      AUDIO_STREAM_OUTPUT_FORMATS[2].presets.map(
+      AUDIO_STREAM_OUTPUT_FORMATS[5].presets.map(
         ({ bitDepth, preset, processingPrecision }) => [
           preset.id,
           bitDepth,
@@ -151,7 +224,69 @@ describe('stream capability discovery', () => {
       ['flac-24bit', 24, 24],
     ]);
     expect(
-      AUDIO_STREAM_OUTPUT_FORMATS[1].presets.map(({ preset, target }) => ({
+      AUDIO_STREAM_OUTPUT_FORMATS[2].presets.map(({ preset, target }) => ({
+        presetId: preset.id,
+        channels: target.channels,
+        sampleRates:
+          target.sampleRate.kind === 'discrete'
+            ? target.sampleRate.values
+            : [],
+      })),
+    ).toEqual([
+      {
+        presetId: 'aac-96kbps',
+        channels: { maximum: 2, minimum: 1 },
+        sampleRates: [32_000, 44_100, 48_000],
+      },
+      {
+        presetId: 'aac-128kbps',
+        channels: { maximum: 2, minimum: 1 },
+        sampleRates: [32_000, 44_100, 48_000],
+      },
+      {
+        presetId: 'aac-192kbps',
+        channels: { maximum: 2, minimum: 1 },
+        sampleRates: [32_000, 44_100, 48_000],
+      },
+      {
+        presetId: 'aac-256kbps',
+        channels: { maximum: 2, minimum: 1 },
+        sampleRates: [32_000, 44_100, 48_000],
+      },
+    ]);
+    expect(
+      AUDIO_STREAM_OUTPUT_FORMATS[3].presets.map(({ preset, target }) => ({
+        presetId: preset.id,
+        channels: target.channels,
+        sampleRates:
+          target.sampleRate.kind === 'discrete'
+            ? target.sampleRate.values
+            : [],
+      })),
+    ).toEqual([
+      {
+        presetId: 'ogg-opus-64kbps',
+        channels: { maximum: 2, minimum: 1 },
+        sampleRates: [48_000],
+      },
+      {
+        presetId: 'ogg-opus-96kbps',
+        channels: { maximum: 2, minimum: 1 },
+        sampleRates: [48_000],
+      },
+      {
+        presetId: 'ogg-opus-128kbps',
+        channels: { maximum: 2, minimum: 1 },
+        sampleRates: [48_000],
+      },
+      {
+        presetId: 'ogg-opus-192kbps',
+        channels: { maximum: 2, minimum: 1 },
+        sampleRates: [48_000],
+      },
+    ]);
+    expect(
+      AUDIO_STREAM_OUTPUT_FORMATS[4].presets.map(({ preset, target }) => ({
         presetId: preset.id,
         sampleRates: target.sampleRate.kind === 'discrete'
           ? target.sampleRate.values
@@ -166,7 +301,7 @@ describe('stream capability discovery', () => {
       { presetId: 'mp3-256kbps', sampleRates: [32_000, 44_100, 48_000] },
       { presetId: 'mp3-320kbps', sampleRates: [32_000, 44_100, 48_000] },
     ]);
-    expect(AUDIO_STREAM_OUTPUT_FORMATS[2].presets[0].target).toEqual({
+    expect(AUDIO_STREAM_OUTPUT_FORMATS[5].presets[0].target).toEqual({
       channels: { maximum: 8, minimum: 1 },
       sampleRate: {
         kind: 'discrete',
@@ -203,15 +338,24 @@ describe('stream capability discovery', () => {
     ).toEqualTypeOf<'wav-pcm16'>();
     expectTypeOf(
       AUDIO_STREAM_OUTPUT_FORMATS[1].presets[0].preset.id,
-    ).toEqualTypeOf<'mp3-128kbps'>();
+    ).toEqualTypeOf<'aiff-pcm16'>();
     expectTypeOf(
       AUDIO_STREAM_OUTPUT_FORMATS[2].presets[0].preset.id,
+    ).toEqualTypeOf<'aac-96kbps'>();
+    expectTypeOf(
+      AUDIO_STREAM_OUTPUT_FORMATS[3].presets[0].preset.id,
+    ).toEqualTypeOf<'ogg-opus-64kbps'>();
+    expectTypeOf(
+      AUDIO_STREAM_OUTPUT_FORMATS[4].presets[0].preset.id,
+    ).toEqualTypeOf<'mp3-128kbps'>();
+    expectTypeOf(
+      AUDIO_STREAM_OUTPUT_FORMATS[5].presets[0].preset.id,
     ).toEqualTypeOf<'flac-16bit'>();
     expectTypeOf<
       AudioStreamBuiltInOutputFormatDescriptor['loading']
     >().toEqualTypeOf<'eager'>();
     expectTypeOf<
-      AudioStreamBundledWasmOutputFormatDescriptor['loading']
+      AudioStreamRuntimeAssetOutputFormatDescriptor['loading']
     >().toEqualTypeOf<'lazy'>();
     expectTypeOf<
       AudioStreamLosslessOutputPresetDescriptor['bitDepth']

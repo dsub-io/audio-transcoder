@@ -32,6 +32,14 @@ import {
   createAudioStreamOutputProbeCoordinator,
   probeAudioStreamOutputSupport,
 } from './output-support-probe.js';
+import {
+  createJsDelivrRuntimeAssetSource,
+  createSelfHostedRuntimeAssetSource,
+  RuntimeAssetError,
+  type RuntimeAssetLoadState,
+  type RuntimeAssetSource,
+  type RuntimeAssetStateListener,
+} from '../assets/runtime-asset-provider.js';
 
 type StreamOperation =
   | 'inspect'
@@ -46,8 +54,8 @@ type StreamResult =
 
 interface QueuedOperation {
   abortListener: (() => void) | undefined;
-  cancelReason: unknown;
   cancelRequested: boolean;
+  commitStarted: boolean;
   readonly id: number;
   readonly onProgress: AudioStreamOperationOptions['onProgress'];
   readonly outputBridge: OutputBridge | undefined;
@@ -65,20 +73,25 @@ interface OutputBridgeSettlement {
   readonly status: 'closed' | 'failed';
 }
 
+type OutputBridgeReadiness =
+  | { readonly status: 'ready' }
+  | { readonly reason: unknown; readonly status: 'failed' };
+
 interface OutputBridge {
   abort(reason: unknown): Promise<void>;
+  commit(): Promise<OutputBridgeSettlement>;
   readonly completion: Promise<OutputBridgeSettlement>;
+  readonly ready: Promise<OutputBridgeReadiness>;
   readonly stream: AudioStreamOutput;
 }
 
 /** Creates a serial, bounded-memory module Worker for streaming operations. */
 export function createAudioTranscoderStreamWorkerEngine(
-  options: CreateAudioTranscoderStreamWorkerEngineOptions = {},
+  options: CreateAudioTranscoderStreamWorkerEngineOptions,
 ): AudioTranscoderStreamWorkerEngine {
-  const { capabilities, workerFactory } =
-    resolveAudioTranscoderStreamWorkerRuntime(options);
+  const runtime = resolveAudioTranscoderStreamWorkerRuntime(options);
+  const { capabilities, workerFactory } = runtime;
   const maxQueued = resolveMaxQueued(options.maxQueued, capabilities);
-  const worker = createWorker(workerFactory);
   const outputProbeCoordinator = createAudioStreamOutputProbeCoordinator();
   const queue: QueuedOperation[] = [];
   const pendingOutputCleanups = new Set<Promise<void>>();
@@ -86,6 +99,8 @@ export function createAudioTranscoderStreamWorkerEngine(
   let disposal: Promise<void> | undefined;
   let nextOperationId = 1;
   let terminated = false;
+  let worker: Worker | undefined;
+  let workerGeneration = 0;
 
   const detachAbort = (operation: QueuedOperation): void => {
     if (operation.abortListener !== undefined) {
@@ -104,18 +119,27 @@ export function createAudioTranscoderStreamWorkerEngine(
     }
     active = operation;
     operation.posted = true;
+    const replacingWorker = worker === undefined;
     try {
-      worker.postMessage(operation.request, operation.transfer);
+      ensureWorker().postMessage(operation.request, operation.transfer);
     } catch (error) {
       operation.settling = true;
       detachAbort(operation);
-      void trackOutputBridgeAbort(operation, error).then(() => {
-        if (active === operation) {
-          active = undefined;
-          operation.reject(error);
-          drain();
-        }
-      });
+      const cleanup = trackOutputBridgeAbort(operation, error);
+      if (replacingWorker && active === operation) {
+        const workerError = replacementWorkerError(error);
+        active = undefined;
+        operation.reject(workerError);
+        void beginDisposal(workerError);
+      } else {
+        void cleanup.then(() => {
+          if (active === operation) {
+            active = undefined;
+            operation.reject(error);
+            drain();
+          }
+        });
+      }
     }
   };
 
@@ -130,23 +154,38 @@ export function createAudioTranscoderStreamWorkerEngine(
   };
 
   const rejectAll = async (error: AudioTranscoderError): Promise<void> => {
-    const operations = active === undefined ? queue.splice(0) : [active, ...queue.splice(0)];
-    active = undefined;
+    const committedOperation = active?.commitStarted === true ? active : undefined;
+    const operations =
+      active === undefined
+        ? queue.splice(0)
+        : committedOperation === undefined
+          ? [active, ...queue.splice(0)]
+          : queue.splice(0);
+    if (committedOperation === undefined) {
+      active = undefined;
+    }
     const cleanups: Promise<void>[] = [];
     for (const operation of operations) {
       detachAbort(operation);
       cleanups.push(trackOutputBridgeAbort(operation, error));
-      operation.reject(
-        operation.cancelRequested ? operation.cancelReason : error,
-      );
+      operation.reject(error);
     }
-    await Promise.all([...cleanups, ...pendingOutputCleanups]);
+    await Promise.all([
+      ...cleanups,
+      ...pendingOutputCleanups,
+      ...(committedOperation?.outputBridge === undefined
+        ? []
+        : [committedOperation.outputBridge.completion.then(() => undefined)]),
+    ]);
   };
 
   const beginDisposal = (error: AudioTranscoderError): Promise<void> => {
     if (disposal === undefined) {
       terminated = true;
-      worker.terminate();
+      const retiringWorker = worker;
+      worker = undefined;
+      workerGeneration += 1;
+      retiringWorker?.terminate();
       disposal = rejectAll(error);
       outputProbeCoordinator.clear(error);
     }
@@ -154,70 +193,141 @@ export function createAudioTranscoderStreamWorkerEngine(
   };
 
   const failWorker = (message: string): void => {
-    if (!terminated) {
-      void beginDisposal(new AudioTranscoderError('WORKER_FAILURE', message));
-    }
+    void beginDisposal(new AudioTranscoderError('WORKER_FAILURE', message));
   };
 
-  worker.addEventListener(
-    'message',
-    (event: MessageEvent<AudioStreamWorkerResponse>) => {
-      const response = event.data;
-      const operation = active;
-      if (operation === undefined || response.id !== operation.id) {
-        return;
-      }
-      if (response.type === 'progress') {
-        if (!operation.cancelRequested) {
+  const attachWorkerListeners = (
+    targetWorker: Worker,
+    generation: number,
+  ): void => {
+    targetWorker.addEventListener(
+      'message',
+      (event: MessageEvent<AudioStreamWorkerResponse>) => {
+        if (terminated || generation !== workerGeneration) {
+          return;
+        }
+        const response = event.data;
+        if (response.type === 'configured') {
+          return;
+        }
+        if (response.type === 'asset-state') {
+          if (runtime.runtime === 'default') {
+            try {
+              runtime.onAssetStateChange?.(
+                deserializeAssetState(response.state),
+              );
+            } catch {
+              // Asset observers cannot interrupt Worker lifecycle or conversion.
+            }
+          }
+          return;
+        }
+        if (response.type === 'configuration-error') {
+          const error = deserializeWorkerError(response.error);
+          void beginDisposal(
+            new AudioTranscoderError(
+              'WORKER_FAILURE',
+              `Audio stream Worker codec asset configuration failed: ${error.message}`,
+            ),
+          );
+          return;
+        }
+        const operation = active;
+        if (operation === undefined || response.id !== operation.id) {
+          return;
+        }
+        if (response.type === 'progress') {
           try {
             operation.onProgress?.(Object.freeze({ ...response.progress }));
           } catch (error) {
             cancelActive(operation, error);
           }
-        }
-        return;
-      }
-      if (operation.settling) {
-        return;
-      }
-      operation.settling = true;
-      detachAbort(operation);
-      void (async () => {
-        const operationError = operation.cancelRequested
-          ? operation.cancelReason
-          : response.type === 'error'
-            ? deserializeWorkerError(response.error)
-            : undefined;
-        if (operation.cancelRequested || response.type === 'error') {
-          await waitForOutputBridgeAbort(operation, operationError);
-        }
-        const outputSettlement =
-          !operation.cancelRequested && response.type === 'result'
-            ? await operation.outputBridge?.completion
-            : undefined;
-        if (active !== operation) {
           return;
         }
-        active = undefined;
-        if (operation.cancelRequested) {
-          operation.reject(operation.cancelReason);
-        } else if (response.type === 'error') {
-          operation.reject(operationError);
-        } else if (outputSettlement?.status === 'failed') {
-          operation.reject(outputSettlement.reason);
-        } else {
-          operation.resolve(freezeResult(response.operation, response.value));
+        if (operation.settling) {
+          return;
         }
-        drain();
-      })();
-    },
-  );
-  worker.addEventListener('error', (event: ErrorEvent) => {
-    failWorker(event.message || 'Audio stream worker failed.');
-  });
-  worker.addEventListener('messageerror', () => {
-    failWorker('Audio stream worker returned an unreadable message.');
-  });
+        operation.settling = true;
+        void (async () => {
+          const operationError =
+            response.type === 'error'
+              ? deserializeWorkerError(response.error)
+              : undefined;
+          if (response.type === 'error') {
+            await waitForOutputBridgeAbort(operation, operationError);
+          }
+          let outputSettlement: OutputBridgeSettlement | undefined;
+          if (response.type === 'result' && operation.outputBridge !== undefined) {
+            const readiness = await operation.outputBridge.ready;
+            if (active !== operation) {
+              return;
+            }
+            if (readiness.status === 'failed') {
+              outputSettlement = readiness;
+            } else {
+              // The Worker has closed its side and returned success. From this
+              // synchronous boundary onward, destination close is irreversible;
+              // later cancellation or engine disposal waits for that result.
+              detachAbort(operation);
+              operation.commitStarted = true;
+              outputSettlement = await operation.outputBridge.commit();
+            }
+          }
+          if (active !== operation) {
+            return;
+          }
+          detachAbort(operation);
+          active = undefined;
+          if (response.type === 'error') {
+            operation.reject(operationError);
+          } else if (outputSettlement?.status === 'failed') {
+            operation.reject(outputSettlement.reason);
+          } else {
+            operation.resolve(freezeResult(response.operation, response.value));
+          }
+          drain();
+        })();
+      },
+    );
+    targetWorker.addEventListener('error', (event: ErrorEvent) => {
+      if (!terminated && generation === workerGeneration) {
+        failWorker(event.message || 'Audio stream worker failed.');
+      }
+    });
+    targetWorker.addEventListener('messageerror', () => {
+      if (!terminated && generation === workerGeneration) {
+        failWorker('Audio stream worker returned an unreadable message.');
+      }
+    });
+  };
+
+  const ensureWorker = (): Worker => {
+    if (worker !== undefined) {
+      return worker;
+    }
+    const nextWorker = createWorker(workerFactory);
+    const generation = workerGeneration + 1;
+    workerGeneration = generation;
+    worker = nextWorker;
+    attachWorkerListeners(nextWorker, generation);
+    if (runtime.runtime === 'default') {
+      try {
+        nextWorker.postMessage({
+          codecAssets: runtime.codecAssets,
+          type: 'configure',
+        } satisfies AudioStreamWorkerRequest);
+      } catch (error) {
+        worker = undefined;
+        workerGeneration += 1;
+        nextWorker.terminate();
+        throw new AudioTranscoderError(
+          'WORKER_FAILURE',
+          `Failed to configure the audio stream Worker codec assets: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return nextWorker;
+  };
 
   const enqueue = <T extends StreamResult>(
     operation: StreamOperation,
@@ -236,8 +346,8 @@ export function createAudioTranscoderStreamWorkerEngine(
     return new Promise<T>((resolve, reject) => {
       const queued: QueuedOperation = {
         abortListener: undefined,
-        cancelReason: undefined,
         cancelRequested: false,
+        commitStarted: false,
         id,
         onProgress:
           operation === 'transcode' ? operationOptions.onProgress : undefined,
@@ -277,18 +387,33 @@ export function createAudioTranscoderStreamWorkerEngine(
     operation: QueuedOperation,
     error: unknown,
   ): void => {
-    if (operation.cancelRequested) {
+    if (
+      operation.cancelRequested ||
+      operation.commitStarted ||
+      active !== operation
+    ) {
       return;
     }
     operation.cancelRequested = true;
-    operation.cancelReason = error;
+    operation.settling = true;
     detachAbort(operation);
     void trackOutputBridgeAbort(operation, error);
+    const retiringWorker = worker;
+    worker = undefined;
+    workerGeneration += 1;
     try {
-      worker.postMessage({ id: operation.id, type: 'cancel' } satisfies AudioStreamWorkerRequest);
+      retiringWorker?.postMessage({
+        id: operation.id,
+        type: 'cancel',
+      } satisfies AudioStreamWorkerRequest);
     } catch {
-      // The terminal Worker event still controls when the next job may start.
+      // Termination below remains authoritative when cancel cannot be posted.
+    } finally {
+      retiringWorker?.terminate();
     }
+    active = undefined;
+    operation.reject(error);
+    drain();
   };
 
   const getAdmissionError = (
@@ -308,6 +433,8 @@ export function createAudioTranscoderStreamWorkerEngine(
     }
     return undefined;
   };
+
+  ensureWorker();
 
   return {
     dispose(): Promise<void> {
@@ -415,6 +542,8 @@ type ResolvedAudioTranscoderStreamWorkerRuntime<WorkerFactory> =
     }
   | {
       readonly capabilities: typeof AUDIO_TRANSCODER_STREAM_CAPABILITIES;
+      readonly codecAssets: import('./protocol.js').AudioStreamWorkerCodecAssetConfiguration;
+      readonly onAssetStateChange: import('../assets/runtime-asset-provider.js').RuntimeAssetStateListener | undefined;
       readonly runtime: 'default';
       readonly workerFactory: WorkerFactory | undefined;
     };
@@ -432,6 +561,7 @@ export function resolveAudioTranscoderStreamWorkerRuntime<WorkerFactory>(
 
   const runtimeOptions = options as {
     readonly capabilities?: unknown;
+    readonly codecAssets?: unknown;
     readonly runtime?: unknown;
     readonly workerFactory?: unknown;
   };
@@ -459,14 +589,25 @@ export function resolveAudioTranscoderStreamWorkerRuntime<WorkerFactory>(
         "Custom stream capabilities require runtime: 'custom' and a matching workerFactory.",
       );
     }
+    const codecAssets = validateCodecAssetsConfiguration(
+      runtimeOptions.codecAssets,
+    );
     return {
       capabilities: AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+      codecAssets: Object.freeze({
+        ...(codecAssets.fallbackSources === undefined
+          ? {}
+          : { fallbackSources: codecAssets.fallbackSources }),
+        source: codecAssets.source,
+      }),
+      onAssetStateChange: codecAssets.onStateChange,
       runtime,
       workerFactory: runtimeOptions.workerFactory as WorkerFactory | undefined,
     };
   }
 
   if (
+    runtimeOptions.codecAssets !== undefined ||
     runtimeOptions.capabilities === null ||
     typeof runtimeOptions.capabilities !== 'object' ||
     !('limits' in runtimeOptions.capabilities) ||
@@ -490,6 +631,112 @@ export function resolveAudioTranscoderStreamWorkerRuntime<WorkerFactory>(
     runtime,
     workerFactory: runtimeOptions.workerFactory as WorkerFactory,
   };
+}
+
+function validateCodecAssetsConfiguration(
+  value: unknown,
+): import('../assets/audio-codec-assets.js').AudioTranscoderCodecAssetsConfiguration {
+  if (value === null || typeof value !== 'object') {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      'The default stream Worker requires an explicit codecAssets configuration.',
+    );
+  }
+  const configuration = value as {
+    readonly fallbackSources?: unknown;
+    readonly onStateChange?: unknown;
+    readonly source?: unknown;
+  };
+  const onStateChange = configuration.onStateChange;
+  if (
+    onStateChange !== undefined &&
+    typeof onStateChange !== 'function'
+  ) {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      'codecAssets.onStateChange must be a function when provided.',
+    );
+  }
+  const stateListener = onStateChange as RuntimeAssetStateListener | undefined;
+  const fallbackSources = configuration.fallbackSources;
+  if (
+    fallbackSources !== undefined &&
+    !Array.isArray(fallbackSources)
+  ) {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      'codecAssets.fallbackSources must be an array when provided.',
+    );
+  }
+  try {
+    const source = snapshotRuntimeAssetSource(configuration.source);
+    const fallbackSnapshot =
+      fallbackSources === undefined
+        ? undefined
+        : Object.freeze(fallbackSources.map(snapshotRuntimeAssetSource));
+    return Object.freeze({
+      ...(fallbackSnapshot === undefined
+        ? {}
+        : { fallbackSources: fallbackSnapshot }),
+      ...(stateListener === undefined
+        ? {}
+        : { onStateChange: stateListener }),
+      source,
+    });
+  } catch (error) {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
+
+function snapshotRuntimeAssetSource(value: unknown): RuntimeAssetSource {
+  if (value === null || typeof value !== 'object') {
+    throw new Error('Runtime asset source must be an object.');
+  }
+  const source = value as {
+    readonly baseUrl?: unknown;
+    readonly kind?: unknown;
+    readonly packageName?: unknown;
+    readonly packageVersion?: unknown;
+  };
+  switch (source.kind) {
+    case 'jsdelivr':
+      if (
+        typeof source.packageName !== 'string' ||
+        typeof source.packageVersion !== 'string'
+      ) {
+        throw new Error(
+          'jsDelivr runtime asset source requires a package name and exact version.',
+        );
+      }
+      return createJsDelivrRuntimeAssetSource(
+        source.packageName,
+        source.packageVersion,
+      );
+    case 'self-hosted':
+      if (typeof source.baseUrl !== 'string') {
+        throw new Error(
+          'Self-hosted runtime asset source requires a base URL.',
+        );
+      }
+      return createSelfHostedRuntimeAssetSource(source.baseUrl);
+    default:
+      throw new Error('Unsupported runtime asset source kind.');
+  }
+}
+
+function deserializeAssetState(
+  state: import('./protocol.js').AudioStreamWorkerAssetLoadState,
+): RuntimeAssetLoadState {
+  return Object.freeze({
+    ...state,
+    error:
+      state.error === null
+        ? null
+        : new RuntimeAssetError(state.error.code, state.error.message),
+  });
 }
 
 async function waitForOutputBridgeAbort(
@@ -541,49 +788,65 @@ function createOutputBridge(output: AudioStreamOutput): OutputBridge {
 
   const writer = output.getWriter();
   let abortPromise: Promise<void> | undefined;
+  let readinessState: OutputBridgeReadiness | undefined;
   let settled = false;
+  let resolveReady!: (readiness: OutputBridgeReadiness) => void;
   let resolveCompletion!: (settlement: OutputBridgeSettlement) => void;
+  const ready = new Promise<OutputBridgeReadiness>((resolve) => {
+    resolveReady = resolve;
+  });
   const completion = new Promise<OutputBridgeSettlement>((resolve) => {
     resolveCompletion = resolve;
   });
 
-  const settle = (settlement: OutputBridgeSettlement): void => {
-    if (!settled) {
-      settled = true;
-      writer.releaseLock();
-      resolveCompletion(settlement);
+  const setReadiness = (readiness: OutputBridgeReadiness): void => {
+    if (readinessState === undefined) {
+      readinessState = readiness;
+      resolveReady(readiness);
     }
+  };
+  const settle = (settlement: OutputBridgeSettlement): void => {
+    settled = true;
+    writer.releaseLock();
+    resolveCompletion(settlement);
   };
   const fail = (reason: unknown): void => {
-    settle({ reason, status: 'failed' });
+    const failure = { reason, status: 'failed' } as const;
+    setReadiness(failure);
+    settle(failure);
   };
-  const abortOnce = async (reason: unknown): Promise<void> => {
+  const abortOnce = (reason: unknown): Promise<void> => {
     if (settled) {
-      return;
+      return Promise.resolve();
     }
-    try {
-      await writer.abort(reason);
-      fail(reason);
-    } catch (error) {
-      fail(error);
-      throw error;
-    }
+    const aborting = writer.abort(reason);
+    // Releasing ownership does not need to wait for a non-cooperative sink's
+    // abort hook. Disposal still tracks the hook's eventual settlement.
+    fail(reason);
+    return aborting;
   };
   const abort = (reason: unknown): Promise<void> => {
     abortPromise ??= abortOnce(reason);
     return abortPromise;
   };
+  const commit = (): Promise<OutputBridgeSettlement> => {
+    const closing = writer.close();
+    return closing.then(
+      () => {
+        settle({ reason: undefined, status: 'closed' });
+        return completion;
+      },
+      (error: unknown) => {
+        fail(error);
+        return completion;
+      },
+    );
+  };
 
   const stream = new WritableStream<AudioStreamOutputChunk>({
     abort,
-    async close() {
-      try {
-        await writer.close();
-        settle({ reason: undefined, status: 'closed' });
-      } catch (error) {
-        fail(error);
-        throw error;
-      }
+    close() {
+      setReadiness({ status: 'ready' });
     },
     async write(chunk) {
       try {
@@ -595,7 +858,7 @@ function createOutputBridge(output: AudioStreamOutput): OutputBridge {
     },
   });
 
-  return { abort, completion, stream };
+  return { abort, commit, completion, ready, stream };
 }
 
 function createWorker(workerFactory: (() => Worker) | undefined): Worker {
@@ -612,6 +875,16 @@ function createWorker(workerFactory: (() => Worker) | undefined): Worker {
     name: 'dsub-audio-stream-transcoder',
     type: 'module',
   });
+}
+
+function replacementWorkerError(error: unknown): AudioTranscoderError {
+  if (error instanceof AudioTranscoderError && error.code === 'WORKER_FAILURE') {
+    return error;
+  }
+  return new AudioTranscoderError(
+    'WORKER_FAILURE',
+    `Failed to replace the audio stream Worker: ${error instanceof Error ? error.message : String(error)}`,
+  );
 }
 
 function workerOptions(
@@ -668,5 +941,8 @@ function freezeInspection(
   return Object.freeze({
     ...inspection,
     notes: Object.freeze([...inspection.notes]),
+    sourceEncoding: Object.freeze({
+      ...(inspection.sourceEncoding ?? { kind: 'unknown' as const }),
+    }),
   });
 }

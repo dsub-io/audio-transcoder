@@ -3,6 +3,7 @@ import type {
   AudioInput,
   AudioInspection,
   AudioOutputPreset,
+  AudioSourceEncoding,
   DecodedAudio,
   EncodedAudio,
   PcmAudio,
@@ -88,6 +89,7 @@ export const wavInspector: AudioInspectorAdapter = Object.freeze({
       durationSeconds: calculateDuration(parsed, input),
       notes: format === null ? ['WAV fmt chunk was not found.'] : [],
       sampleRate: format?.sampleRate ?? null,
+      sourceEncoding: getWavSourceEncoding(format),
     };
   },
 });
@@ -209,6 +211,21 @@ export const wavEncoder: AudioEncoderAdapter = Object.freeze({
 
 function isWav(view: DataView): boolean {
   return readAscii(view, 0, 4) === 'RIFF' && readAscii(view, 8, 4) === 'WAVE';
+}
+
+function getWavSourceEncoding(format: WavFormat | null): AudioSourceEncoding {
+  if (format === null || (format.formatTag !== 1 && format.formatTag !== 3)) {
+    return Object.freeze({ kind: 'unknown' });
+  }
+  const float = format.formatTag === 3;
+  return Object.freeze({
+    bitDepth: format.bitDepth > 0 ? format.bitDepth : null,
+    endianness: format.bitDepth <= 8 ? 'not-applicable' : 'little',
+    kind: 'pcm',
+    sampleFormat: float ? 'float' : 'integer',
+    signedness:
+      float ? 'not-applicable' : format.bitDepth === 8 ? 'unsigned' : 'signed',
+  });
 }
 
 function parseWav(view: DataView): ParsedWav {

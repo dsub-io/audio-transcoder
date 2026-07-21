@@ -58,6 +58,31 @@ const SUPPORTED_OUTPUT: AudioStreamOutputSupportResult = {
 };
 
 describe('stream worker host', () => {
+  it('rejects package codec configuration on a custom Worker host', () => {
+    const postMessage = vi.fn();
+    const handle = createStreamWorkerMessageHandler({
+      engine: createEngine(),
+      postMessage,
+    });
+
+    handle(
+      messageEvent({
+        codecAssets: {
+          source: { baseUrl: '/codec-assets', kind: 'self-hosted' },
+        },
+        type: 'configure',
+      }),
+    );
+
+    expect(postMessage).toHaveBeenCalledWith({
+      error: expect.objectContaining({
+        code: 'INVALID_CONFIGURATION',
+        message: expect.stringContaining('custom stream Worker'),
+      }),
+      type: 'configuration-error',
+    });
+  });
+
   it('executes requests serially in FIFO order', async () => {
     let resolveFirst!: (value: AudioStreamInspection) => void;
     const inspect = vi
