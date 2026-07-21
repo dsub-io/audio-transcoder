@@ -202,18 +202,29 @@ consumer's responsibility:
 ```ts
 import {
   getAudioStreamOutputParameters,
-  resolveAudioStreamFormatTarget,
+  getAudioStreamOutputSampleRateOptions,
+  resolveAudioStreamSourceAwareFormatTarget,
 } from '@dsub/audio-transcoder';
 
 const fields = getAudioStreamOutputParameters('wav');
 // sample-format: integer | float
 // bit-depth: 16 | 24 | 32, filtered by the other current selections
 
-const resolved = resolveAudioStreamFormatTarget(
+const sampleRates = getAudioStreamOutputSampleRateOptions(
+  { formatId: 'wav', presetId: 'wav-pcm24' },
+  inspection,
+);
+if (sampleRates.status === 'unsupported') {
+  renderInvalidTarget(sampleRates.reason, sampleRates.message);
+} else {
+  renderSampleRates(sampleRates.options);
+}
+
+const resolved = resolveAudioStreamSourceAwareFormatTarget(
   {
     formatId: 'wav',
     parameters: { bitDepth: 24, sampleFormat: 'integer' },
-    sampleRate: 'source',
+    sampleRate: 'automatic',
   },
   inspection,
 );
@@ -225,11 +236,33 @@ if (resolved.status === 'unsupported') {
 }
 ```
 
-The resolver preserves the inspected source channel count and sample rate by
-default. Ogg Opus has one encoder clock, 48 kHz; for a non-48-kHz source select
-48 kHz explicitly so the resulting target declares resampling. Formats with
-lossy presets expose `bitrate-bps`/`bitrateBps`; lossless formats expose only
-their meaningful sample-format or bit-depth choices.
+The source-aware resolver always preserves the inspected source channel count
+and validates it before selecting a rate; it never downmixes. `automatic`
+first preserves a source rate accepted by the preset and pass-through path. If
+that is impossible for a discrete preset, it chooses among only the preset's
+exact rates that are valid for the global resampling path, minimizing absolute
+Hz distance and choosing the higher rate on a tie. A range preset preserves the
+source when valid and does not invent fallback candidates. The existing
+`resolveAudioStreamFormatTarget()` and its `'source' | number` sample-rate
+selection remain available for exact source-preserving or explicit behavior.
+
+`getAudioStreamOutputSampleRateOptions()` returns an immutable discriminated
+result for one exact format, preset, and source. An unsupported result reports
+`format`, `preset`, `source-inspection`, or `channels`; no rate is advertised
+until the source-owned channel layout has been validated. A resolved result's
+`options` contain immutable entries whose `path` is `pass-through` or
+`resampling`. Unsupported entries report a machine-readable reason such as
+`preset-sample-rate`,
+`resampling-source-sample-rate`, or `resampling-target-sample-rate`. For range
+presets its default list contains only the source rate; pass exact
+`candidateSampleRates` in the selection object to evaluate application-owned
+choices. The package supplies no labels, translations, or UI policy.
+
+Formats with lossy presets expose `bitrate-bps`/`bitrateBps`; their public
+capability descriptors also expose `bitrateMode`. AAC and Ogg Opus are
+`variable`, while MP3 is `constant`. Container, extension, MIME type, and
+lossless processing precision remain owned by their existing format and preset
+descriptors rather than being copied into semantic encoding options.
 
 The manifest's `loading: 'lazy'` is static metadata, not an aggregate runtime
 state. Render `checking` before awaiting `probeOutputSupport()` and `preparing`
@@ -351,7 +384,9 @@ initial transfer. Never launch all output probes concurrently.
 
 WAV and AIFF accept 1-32 channels and 8,000-384,000 Hz. AAC-LC accepts 1-2
 channels at exactly 32,000, 44,100, or 48,000 Hz. Ogg Opus accepts 1-2 channels
-at its 48,000 Hz codec clock. MP3 accepts 1-2 channels: `mp3-128kbps` accepts
+at its 48,000 Hz codec clock. Automatic selection converts another supported
+source rate to 48,000 Hz, but rejects sources outside the global resampling
+range. MP3 accepts 1-2 channels: `mp3-128kbps` accepts
 exactly 16,000, 22,050, 24,000, 32,000, 44,100, and 48,000 Hz;
 `mp3-192kbps`, `mp3-256kbps`, and `mp3-320kbps` accept exactly 32,000, 44,100,
 and 48,000 Hz. Lower-rate combinations are excluded because LAME can silently

@@ -144,6 +144,7 @@ export interface StreamLosslessOutputPresetDescriptor
 export interface StreamLossyOutputPresetDescriptor
   extends StreamOutputPresetDescriptorBase {
   readonly bitrate: number;
+  readonly bitrateMode: 'constant' | 'variable';
   readonly kind: 'lossy';
   readonly preset: AudioOutputPreset & {
     readonly bitDepth: null;
@@ -348,6 +349,7 @@ function defineAacPreset<
   bitrate: Bitrate,
 ): Readonly<{
   readonly bitrate: Bitrate;
+  readonly bitrateMode: 'variable';
   readonly codec: 'aac';
   readonly constraints: typeof AAC_OUTPUT_CODEC_CONSTRAINTS;
   readonly encoding: Readonly<{
@@ -369,6 +371,7 @@ function defineAacPreset<
 }> {
   return Object.freeze({
     bitrate,
+    bitrateMode: 'variable' as const,
     codec: 'aac' as const,
     constraints: AAC_OUTPUT_CODEC_CONSTRAINTS,
     encoding: Object.freeze({
@@ -398,6 +401,7 @@ function defineOggOpusPreset<
   bitrate: Bitrate,
 ): Readonly<{
   readonly bitrate: Bitrate;
+  readonly bitrateMode: 'variable';
   readonly codec: 'opus';
   readonly constraints: typeof OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS;
   readonly encoding: null;
@@ -415,6 +419,7 @@ function defineOggOpusPreset<
 }> {
   return Object.freeze({
     bitrate,
+    bitrateMode: 'variable' as const,
     codec: 'opus' as const,
     constraints: OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS,
     encoding: null,
@@ -442,6 +447,7 @@ function defineMp3Preset<
   constraints: Constraints,
 ): Readonly<{
   readonly bitrate: Bitrate;
+  readonly bitrateMode: 'constant';
   readonly codec: 'mp3';
   readonly constraints: Constraints;
   readonly encoding: Readonly<{
@@ -465,6 +471,7 @@ function defineMp3Preset<
   const transform = Object.freeze({ sampleFormat: 's16' as const });
   return Object.freeze({
     bitrate,
+    bitrateMode: 'constant' as const,
     codec: 'mp3' as const,
     constraints,
     encoding: Object.freeze({

@@ -183,33 +183,33 @@ describe('stream capability discovery', () => {
     });
     expect(
       AUDIO_STREAM_OUTPUT_FORMATS[2].presets.map(
-        ({ bitrate, preset }) => [preset.id, bitrate],
+        ({ bitrate, bitrateMode, preset }) => [preset.id, bitrate, bitrateMode],
       ),
     ).toEqual([
-      ['aac-96kbps', 96_000],
-      ['aac-128kbps', 128_000],
-      ['aac-192kbps', 192_000],
-      ['aac-256kbps', 256_000],
+      ['aac-96kbps', 96_000, 'variable'],
+      ['aac-128kbps', 128_000, 'variable'],
+      ['aac-192kbps', 192_000, 'variable'],
+      ['aac-256kbps', 256_000, 'variable'],
     ]);
     expect(
       AUDIO_STREAM_OUTPUT_FORMATS[3].presets.map(
-        ({ bitrate, preset }) => [preset.id, bitrate],
+        ({ bitrate, bitrateMode, preset }) => [preset.id, bitrate, bitrateMode],
       ),
     ).toEqual([
-      ['ogg-opus-64kbps', 64_000],
-      ['ogg-opus-96kbps', 96_000],
-      ['ogg-opus-128kbps', 128_000],
-      ['ogg-opus-192kbps', 192_000],
+      ['ogg-opus-64kbps', 64_000, 'variable'],
+      ['ogg-opus-96kbps', 96_000, 'variable'],
+      ['ogg-opus-128kbps', 128_000, 'variable'],
+      ['ogg-opus-192kbps', 192_000, 'variable'],
     ]);
     expect(
       AUDIO_STREAM_OUTPUT_FORMATS[4].presets.map(
-        ({ bitrate, preset }) => [preset.id, bitrate],
+        ({ bitrate, bitrateMode, preset }) => [preset.id, bitrate, bitrateMode],
       ),
     ).toEqual([
-      ['mp3-128kbps', 128_000],
-      ['mp3-192kbps', 192_000],
-      ['mp3-256kbps', 256_000],
-      ['mp3-320kbps', 320_000],
+      ['mp3-128kbps', 128_000, 'constant'],
+      ['mp3-192kbps', 192_000, 'constant'],
+      ['mp3-256kbps', 256_000, 'constant'],
+      ['mp3-320kbps', 320_000, 'constant'],
     ]);
     expect(
       AUDIO_STREAM_OUTPUT_FORMATS[5].presets.map(
@@ -363,6 +363,9 @@ describe('stream capability discovery', () => {
     expectTypeOf<
       AudioStreamLossyOutputPresetDescriptor['bitrate']
     >().toEqualTypeOf<number>();
+    expectTypeOf<
+      AudioStreamLossyOutputPresetDescriptor['bitrateMode']
+    >().toEqualTypeOf<'constant' | 'variable'>();
   });
 
   it('separates source pass-through, resampling, queue, and concurrency limits', () => {

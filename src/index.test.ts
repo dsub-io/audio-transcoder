@@ -7,6 +7,7 @@ import {
   AUDIO_TRANSCODER_PACKAGE,
   AUDIO_TRANSCODER_VERSION,
   AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES,
+  AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE,
   AudioTranscoderError,
   WAV_OUTPUT_PRESETS,
   audioTranscoder,
@@ -14,9 +15,11 @@ import {
   createAudioTranscoderJsDelivrAssetSource,
   createSelfHostedRuntimeAssetSource,
   getAudioStreamOutputParameters,
+  getAudioStreamOutputSampleRateOptions,
   getEngineInfo,
   getVersion,
   resolveAudioStreamFormatTarget,
+  resolveAudioStreamSourceAwareFormatTarget,
   type AudioDecodeEstimate,
   type AudioOutputPreset,
   type AudioStreamBuiltInInputFormatDescriptor,
@@ -40,10 +43,14 @@ import {
   type AudioStreamOutputPresetDescriptor,
   type AudioStreamOutputSupportResult,
   type AudioStreamOutputSampleRateConstraints,
+  type AudioStreamOutputSampleRateOption,
+  type AudioStreamOutputSampleRateOptionsResult,
   type AudioStreamOutputTargetConstraints,
   type AudioStreamProcessingPrecision,
   type AudioStreamRecognizedUnsupportedInputResult,
   type AudioStreamRuntimeInputFormatDescriptor,
+  type AudioStreamSampleRateSelection,
+  type AudioStreamSourceAwareSampleRateSelection,
   type AudioStreamSupportedInputResult,
   type AudioStreamSupportedOutputResult,
   type AudioStreamUnsupportedInputResult,
@@ -155,7 +162,22 @@ describe('public stream type surface', () => {
       readonly sampleFormat?: 'float' | 'integer' | 'lossy';
     }>();
     expectTypeOf(getAudioStreamOutputParameters).toBeFunction();
+    expectTypeOf(getAudioStreamOutputSampleRateOptions).toBeFunction();
     expectTypeOf(resolveAudioStreamFormatTarget).toBeFunction();
+    expectTypeOf(resolveAudioStreamSourceAwareFormatTarget).toBeFunction();
+    expect(AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE).toBe('automatic');
+    expectTypeOf<AudioStreamSampleRateSelection>().toEqualTypeOf<
+      'source' | number
+    >();
+    expectTypeOf<AudioStreamSourceAwareSampleRateSelection>().toEqualTypeOf<
+      'automatic' | 'source' | number
+    >();
+    expectTypeOf<AudioStreamOutputSampleRateOption['status']>().toEqualTypeOf<
+      'supported' | 'unsupported'
+    >();
+    expectTypeOf<
+      AudioStreamOutputSampleRateOptionsResult['status']
+    >().toEqualTypeOf<'resolved' | 'unsupported'>();
     expectTypeOf<AudioStreamOutputTargetConstraints['sampleRate']>().toEqualTypeOf<
       AudioStreamOutputSampleRateConstraints
     >();

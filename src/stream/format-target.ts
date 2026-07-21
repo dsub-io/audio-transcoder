@@ -12,10 +12,15 @@ import {
 } from './capabilities.js';
 
 export const AUDIO_STREAM_SOURCE_SAMPLE_RATE = 'source' as const;
+export const AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE = 'automatic' as const;
 
 export type AudioStreamSampleRateSelection =
   | typeof AUDIO_STREAM_SOURCE_SAMPLE_RATE
   | number;
+
+export type AudioStreamSourceAwareSampleRateSelection =
+  | AudioStreamSampleRateSelection
+  | typeof AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE;
 
 export type AudioStreamOutputParameterId =
   | 'bit-depth'
@@ -57,6 +62,70 @@ export interface AudioStreamFormatTargetSelection {
   readonly presetId?: string;
   readonly sampleRate?: AudioStreamSampleRateSelection;
 }
+
+export type AudioStreamSourceAwareFormatTargetSelection = Omit<
+  AudioStreamFormatTargetSelection,
+  'sampleRate'
+> & {
+  readonly sampleRate?: AudioStreamSourceAwareSampleRateSelection;
+};
+
+export interface AudioStreamOutputSampleRateOptionsSelection {
+  /** Additional exact rates to evaluate for range-constrained presets. */
+  readonly candidateSampleRates?: readonly number[];
+  readonly formatId: string;
+  readonly presetId: string;
+}
+
+export type AudioStreamOutputSampleRatePath = 'pass-through' | 'resampling';
+
+export type AudioStreamOutputSampleRateUnsupportedReason =
+  | 'invalid-sample-rate'
+  | 'pass-through-sample-rate'
+  | 'preset-sample-rate'
+  | 'resampling-source-sample-rate'
+  | 'resampling-target-sample-rate';
+
+interface AudioStreamOutputSampleRateOptionBase {
+  readonly path: AudioStreamOutputSampleRatePath;
+  readonly sampleRate: number;
+}
+
+export interface AudioStreamSupportedOutputSampleRateOption
+  extends AudioStreamOutputSampleRateOptionBase {
+  readonly status: 'supported';
+}
+
+export interface AudioStreamUnsupportedOutputSampleRateOption
+  extends AudioStreamOutputSampleRateOptionBase {
+  readonly reason: AudioStreamOutputSampleRateUnsupportedReason;
+  readonly status: 'unsupported';
+}
+
+export type AudioStreamOutputSampleRateOption =
+  | AudioStreamSupportedOutputSampleRateOption
+  | AudioStreamUnsupportedOutputSampleRateOption;
+
+export type AudioStreamOutputSampleRateOptionsErrorReason =
+  | 'channels'
+  | 'format'
+  | 'preset'
+  | 'source-inspection';
+
+export interface AudioStreamOutputSampleRateOptionsError {
+  readonly message: string;
+  readonly reason: AudioStreamOutputSampleRateOptionsErrorReason;
+  readonly status: 'unsupported';
+}
+
+export interface AudioStreamResolvedOutputSampleRateOptions {
+  readonly options: readonly AudioStreamOutputSampleRateOption[];
+  readonly status: 'resolved';
+}
+
+export type AudioStreamOutputSampleRateOptionsResult =
+  | AudioStreamOutputSampleRateOptionsError
+  | AudioStreamResolvedOutputSampleRateOptions;
 
 export type AudioStreamFormatTargetResolutionErrorReason =
   | 'channels'
@@ -151,6 +220,106 @@ export function resolveAudioStreamFormatTarget(
   capabilities: AudioTranscoderStreamCapabilities =
     AUDIO_TRANSCODER_STREAM_CAPABILITIES,
 ): AudioStreamFormatTargetResolution {
+  return resolveFormatTarget(selection, inspection, capabilities, false);
+}
+
+/**
+ * Resolves a source-owned channel layout and a source-aware sample-rate
+ * selection. Automatic selection preserves a valid source rate first, then
+ * considers only exact discrete preset rates supported by the resampling path.
+ */
+export function resolveAudioStreamSourceAwareFormatTarget(
+  selection: AudioStreamSourceAwareFormatTargetSelection,
+  inspection: AudioInspection,
+  capabilities: AudioTranscoderStreamCapabilities =
+    AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+): AudioStreamFormatTargetResolution {
+  return resolveFormatTarget(selection, inspection, capabilities, true);
+}
+
+/**
+ * Validates an exact format, preset, and source before enumerating sample-rate
+ * decisions without probing a codec runtime. Discrete presets contribute their
+ * declared values; range presets contribute only the source rate and
+ * caller-supplied candidates.
+ */
+export function getAudioStreamOutputSampleRateOptions(
+  selection: AudioStreamOutputSampleRateOptionsSelection,
+  inspection: AudioInspection,
+  capabilities: AudioTranscoderStreamCapabilities =
+    AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+): AudioStreamOutputSampleRateOptionsResult {
+  const format = findFormat(selection.formatId, capabilities);
+  if (format === undefined) {
+    return unsupportedSampleRateOptions(
+      'format',
+      `Output format "${selection.formatId}" is not installed.`,
+    );
+  }
+
+  const preset = format.presets.find(
+    ({ preset: candidate }) => candidate.id === selection.presetId,
+  );
+  if (preset === undefined) {
+    return unsupportedSampleRateOptions(
+      'preset',
+      `Preset "${selection.presetId}" is not installed for format "${format.id}".`,
+    );
+  }
+  if (inspection.channels === null || inspection.sampleRate === null) {
+    return unsupportedSampleRateOptions(
+      'source-inspection',
+      'The source channel count and sample rate must be known.',
+    );
+  }
+  if (
+    !Number.isSafeInteger(inspection.sampleRate) ||
+    inspection.sampleRate <= 0
+  ) {
+    return unsupportedSampleRateOptions(
+      'source-inspection',
+      'The source sample rate must be a positive integer.',
+    );
+  }
+
+  const channels = inspection.channels;
+  if (
+    !Number.isSafeInteger(channels) ||
+    channels < capabilities.limits.channels.minimum ||
+    channels > capabilities.limits.channels.maximum ||
+    channels < preset.target.channels.minimum ||
+    channels > preset.target.channels.maximum
+  ) {
+    return unsupportedSampleRateOptions(
+      'channels',
+      `Preset "${preset.preset.id}" does not support ${channels} source channels.`,
+    );
+  }
+
+  const sourceSampleRate = inspection.sampleRate;
+  const candidates =
+    preset.target.sampleRate.kind === 'discrete'
+      ? [sourceSampleRate, ...preset.target.sampleRate.values]
+      : [sourceSampleRate, ...(selection.candidateSampleRates ?? [])];
+  const options = Object.freeze(
+    [...new Set(candidates)].map((sampleRate) =>
+      sampleRateOption(
+        preset.target.sampleRate,
+        sourceSampleRate,
+        sampleRate,
+        capabilities,
+      ),
+    ),
+  );
+  return Object.freeze({ options, status: 'resolved' as const });
+}
+
+function resolveFormatTarget(
+  selection: AudioStreamSourceAwareFormatTargetSelection,
+  inspection: AudioInspection,
+  capabilities: AudioTranscoderStreamCapabilities,
+  sourceAware: boolean,
+): AudioStreamFormatTargetResolution {
   const format = findFormat(selection.formatId, capabilities);
   if (format === undefined) {
     return unsupported('format', `Output format "${selection.formatId}" is not installed.`);
@@ -193,11 +362,27 @@ export function resolveAudioStreamFormatTarget(
 
   const sampleRateSelection =
     selection.sampleRate ?? AUDIO_STREAM_SOURCE_SAMPLE_RATE;
-  const sampleRate =
-    sampleRateSelection === AUDIO_STREAM_SOURCE_SAMPLE_RATE
-      ? inspection.sampleRate
-      : sampleRateSelection;
   if (
+    sampleRateSelection === AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE &&
+    !sourceAware
+  ) {
+    return unsupported(
+      'sample-rate',
+      `Preset "${preset.preset.id}" does not support automatic Hz for this source.`,
+    );
+  }
+  const sampleRate =
+    sampleRateSelection === AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE
+      ? resolveAutomaticSampleRate(
+          preset.target.sampleRate,
+          inspection.sampleRate,
+          capabilities,
+        )
+      : sampleRateSelection === AUDIO_STREAM_SOURCE_SAMPLE_RATE
+        ? inspection.sampleRate
+        : sampleRateSelection;
+  if (
+    sampleRate === null ||
     !Number.isSafeInteger(sampleRate) ||
     sampleRate <= 0 ||
     !supportsSampleRate(preset.target.sampleRate, sampleRate) ||
@@ -209,7 +394,9 @@ export function resolveAudioStreamFormatTarget(
   ) {
     return unsupported(
       'sample-rate',
-      `Preset "${preset.preset.id}" does not support ${sampleRate} Hz for this source.`,
+      sampleRate === null
+        ? `Preset "${preset.preset.id}" has no automatic sample rate for this source.`
+        : `Preset "${preset.preset.id}" does not support ${sampleRate} Hz for this source.`,
     );
   }
 
@@ -218,11 +405,13 @@ export function resolveAudioStreamFormatTarget(
     presetId: preset.preset.id,
     sampleRate,
   }) as AudioStreamOutputProbeTarget;
+  const preservesSourceSampleRate =
+    sampleRateSelection === AUDIO_STREAM_SOURCE_SAMPLE_RATE ||
+    (sampleRateSelection === AUDIO_STREAM_AUTOMATIC_SAMPLE_RATE &&
+      sampleRate === inspection.sampleRate);
   const target = Object.freeze({
     presetId: preset.preset.id,
-    ...(sampleRateSelection === AUDIO_STREAM_SOURCE_SAMPLE_RATE
-      ? {}
-      : { sampleRate }),
+    ...(preservesSourceSampleRate ? {} : { sampleRate }),
   }) as AudioStreamTarget;
 
   return Object.freeze({
@@ -234,6 +423,32 @@ export function resolveAudioStreamFormatTarget(
   });
 }
 
+function resolveAutomaticSampleRate(
+  constraint: AudioStreamOutputSampleRateConstraints,
+  sourceSampleRate: number,
+  capabilities: AudioTranscoderStreamCapabilities,
+): number | null {
+  if (
+    supportsSampleRate(constraint, sourceSampleRate) &&
+    supportsSampleRatePath(capabilities, sourceSampleRate, sourceSampleRate)
+  ) {
+    return sourceSampleRate;
+  }
+  if (constraint.kind !== 'discrete') {
+    return null;
+  }
+
+  const candidates = constraint.values.filter((sampleRate) =>
+    supportsSampleRatePath(capabilities, sourceSampleRate, sampleRate),
+  );
+  candidates.sort((left, right) => {
+    const distance =
+      Math.abs(left - sourceSampleRate) - Math.abs(right - sourceSampleRate);
+    return distance === 0 ? right - left : distance;
+  });
+  return candidates[0] ?? null;
+}
+
 function findFormat(
   formatId: string,
   capabilities: AudioTranscoderStreamCapabilities,
@@ -243,7 +458,7 @@ function findFormat(
 
 function resolvePreset(
   format: AudioStreamOutputFormatDescriptor,
-  selection: AudioStreamFormatTargetSelection,
+  selection: AudioStreamSourceAwareFormatTargetSelection,
 ): AudioStreamOutputPresetDescriptor | AudioStreamFormatTargetResolutionError {
   if (selection.presetId !== undefined) {
     const preset = format.presets.find(
@@ -366,6 +581,81 @@ function supportsSampleRatePath(
     targetSampleRate >= constraint.minimum &&
     targetSampleRate <= constraint.maximum
   );
+}
+
+function sampleRateOption(
+  presetConstraint: AudioStreamOutputSampleRateConstraints,
+  sourceSampleRate: number,
+  sampleRate: number,
+  capabilities: AudioTranscoderStreamCapabilities,
+): Readonly<AudioStreamOutputSampleRateOption> {
+  const path = sourceSampleRate === sampleRate
+    ? 'pass-through' as const
+    : 'resampling' as const;
+  const reason = sampleRateUnsupportedReason(
+    presetConstraint,
+    sourceSampleRate,
+    sampleRate,
+    capabilities,
+  );
+  return reason === null
+    ? Object.freeze({ path, sampleRate, status: 'supported' as const })
+    : Object.freeze({
+        path,
+        reason,
+        sampleRate,
+        status: 'unsupported' as const,
+      });
+}
+
+function sampleRateUnsupportedReason(
+  presetConstraint: AudioStreamOutputSampleRateConstraints,
+  sourceSampleRate: number,
+  sampleRate: number,
+  capabilities: AudioTranscoderStreamCapabilities,
+): AudioStreamOutputSampleRateUnsupportedReason | null {
+  if (!Number.isSafeInteger(sampleRate) || sampleRate <= 0) {
+    return 'invalid-sample-rate';
+  }
+  if (!supportsSampleRate(presetConstraint, sampleRate)) {
+    return 'preset-sample-rate';
+  }
+  if (sourceSampleRate === sampleRate) {
+    return isWithinSampleRateRange(
+      sampleRate,
+      capabilities.limits.sampleRate.passThrough,
+    )
+      ? null
+      : 'pass-through-sample-rate';
+  }
+  if (
+    !isWithinSampleRateRange(
+      sourceSampleRate,
+      capabilities.limits.sampleRate.resampling,
+    )
+  ) {
+    return 'resampling-source-sample-rate';
+  }
+  return isWithinSampleRateRange(
+    sampleRate,
+    capabilities.limits.sampleRate.resampling,
+  )
+    ? null
+    : 'resampling-target-sample-rate';
+}
+
+function isWithinSampleRateRange(
+  sampleRate: number,
+  range: { readonly maximum: number; readonly minimum: number },
+): boolean {
+  return sampleRate >= range.minimum && sampleRate <= range.maximum;
+}
+
+function unsupportedSampleRateOptions(
+  reason: AudioStreamOutputSampleRateOptionsErrorReason,
+  message: string,
+): Readonly<AudioStreamOutputSampleRateOptionsError> {
+  return Object.freeze({ message, reason, status: 'unsupported' as const });
 }
 
 function unsupported(
