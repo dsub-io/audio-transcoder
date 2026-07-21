@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/dsub-io/audio-transcoder/compare/v0.1.2...v0.2.0) (2026-07-21)
+
+
+### Features
+
+* add source-aware output selection ([#17](https://github.com/dsub-io/audio-transcoder/issues/17)) ([66812c6](https://github.com/dsub-io/audio-transcoder/commit/66812c6aaa9f4443a22119762e36bd163f2e2390))
+
 ## [0.1.2](https://github.com/dsub-io/audio-transcoder/compare/v0.1.1...v0.1.2) (2026-07-21)
 
 
