@@ -16,25 +16,25 @@ env:
 
 jobs:
   verify:
-    runs-on:
-      group: dsub-ci
-      labels: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: ${{ env.PNPM_VERSION }}
           run_install: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -51,9 +51,8 @@ jobs:
 
   browser-matrix:
     name: Browser / ${{ matrix.browser }}
-    runs-on:
-      group: dsub-ci
-      labels: [self-hosted, linux, x64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -61,19 +60,20 @@ jobs:
       matrix:
         browser: [chromium, firefox, webkit]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           clean: true
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up pnpm
-        uses: pnpm/action-setup@v6
+        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6
         with:
           version: ${{ env.PNPM_VERSION }}
           run_install: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version-file: .nvmrc
           cache: pnpm

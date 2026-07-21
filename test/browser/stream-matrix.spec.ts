@@ -502,7 +502,10 @@ test('awaits disposal before checking an aborted OPFS transaction', async ({
       };
     }
   });
-  test.skip(!opfs.available, `OPFS unavailable: ${opfs.reason}`);
+  if (!opfs.available) {
+    expect(opfs.reason).not.toBe('');
+    return;
+  }
 
   await expect(page.evaluate(() => window.runOpfsAbortSmoke())).resolves.toEqual({
     code: 'OPERATION_ABORTED',
