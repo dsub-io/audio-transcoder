@@ -128,19 +128,19 @@ exact-version lockstep:
 
 1. Let Release Please establish the engine version and changelog; do not create
    a manual tag or version edit.
-2. Build and verify this asset package with that exact version and manifest.
-3. Manually publish `@dsub/audio-transcoder-codecs` first.
-4. Fetch every stable jsDelivr URL at that exact version and verify decoded raw
-   size, SHA-256, ABI, schema, package metadata, and the complete audited
-   notice/license payload.
-5. Manually publish `@dsub/audio-transcoder` only after the assets are proven
-   available.
+2. The Release workflow checks out that exact public tag and builds and verifies
+   this asset package.
+3. The workflow publishes `@dsub/audio-transcoder-codecs` first through npm
+   Trusted Publishing (OIDC), without a long-lived npm token.
+4. The workflow fetches every stable jsDelivr URL at that exact version and
+   verifies decoded raw size, SHA-256, ABI, schema, package metadata, and
+   required legal-file presence.
+5. The workflow publishes `@dsub/audio-transcoder` only after the assets are
+   proven available.
 
-The Release workflow intentionally stops after Release Please. Root
-`npm publish` has a fail-closed `prepublishOnly` check for steps 3 and 4; never
-bypass it with `--ignore-scripts`. The codec package is generated from the
-tagged repository and is published manually only after its local package
-verifier passes.
+Root `npm publish` retains a fail-closed `prepublishOnly` check for steps 3 and
+4; never bypass it with `--ignore-scripts`. A workflow dispatch with an existing
+Release Please tag is recovery-only and runs the same exact-tag gates.
 
 See `THIRD_PARTY_NOTICES.md`, `THIRD_PARTY_LICENSES/`, and the pinned build and
 provenance material in the engine repository's `codec-build/` and `vendor/`

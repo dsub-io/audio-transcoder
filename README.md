@@ -523,15 +523,15 @@ package version changes. Runtime consumers can use `audioTranscoder.getVersion()
 The engine and `@dsub/audio-transcoder-codecs` are a lockstep pair: both must
 carry the exact Release Please version, and the engine embeds that asset
 manifest/version. Release order is Release Please version generation, build
-and verify the codec asset package from that tag, manually publish the codec
-asset package, verify every stable versioned jsDelivr URL and raw size/SHA-256,
-then manually publish the engine.
-The Release workflow intentionally stops after Release Please; it does not
-publish either npm package. The engine's `prepublishOnly` gate performs the
-jsDelivr verification and refuses publication until the exact asset package,
-all seven raw WASM files, and the audited notice/license payload are available
-byte-for-byte. Do not use `--ignore-scripts`, create manual tags, or edit
-versions around Release Please.
+and verify the codec asset package from that tag, publish the codec package,
+verify every stable versioned jsDelivr URL and raw size/SHA-256, then publish
+the engine.
+The Release workflow performs those steps automatically on a GitHub-hosted
+runner with npm Trusted Publishing (OIDC); it does not use an `NPM_TOKEN`.
+The engine's `prepublishOnly` gate refuses publication until the exact codec
+package, all seven raw WASM files, package metadata, manifest, and required
+legal files are available. Do not publish locally, use `--ignore-scripts`,
+create manual tags, or edit versions around Release Please.
 
 ## License
 

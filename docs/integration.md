@@ -782,15 +782,15 @@ advice.
 
 The engine and codec asset package release in exact-version lockstep. Let
 Release Please establish the engine version, build and verify the asset package
-from that exact tag, manually publish assets first, verify each stable versioned
-jsDelivr URL and its raw byte count/SHA-256, then manually publish the engine.
-Do not invent tags or edit versions around Release Please.
-The Release workflow stops after Release Please and never publishes npm
-packages. Root `npm publish` runs a fail-closed `prepublishOnly` check against
-the exact versioned jsDelivr package, manifest, all seven asset hashes/sizes,
-and WebAssembly validity. Never bypass it with `--ignore-scripts`. This is
-release-order documentation only; it does not authorize or report a
-publication.
+from that exact tag, publish assets first, verify each stable versioned
+jsDelivr URL and its raw byte count/SHA-256, then publish the engine. The
+Release workflow automates this sequence with npm Trusted Publishing (OIDC) on
+a GitHub-hosted runner and does not use an `NPM_TOKEN`. Do not publish locally,
+invent tags, or edit versions around Release Please.
+Root `npm publish` runs a fail-closed `prepublishOnly` check against the exact
+versioned jsDelivr package, manifest, all seven asset hashes/sizes, WebAssembly
+validity, and required legal-file presence. Never bypass it with
+`--ignore-scripts`.
 
 ## Consumer release gate
 

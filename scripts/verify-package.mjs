@@ -230,6 +230,21 @@ if (
   throw new Error('Package dependencies and source-material files must agree');
 }
 
+const trustedPublishSteps = [
+  'pnpm codec-assets:release',
+  'npm publish ./.artifacts/codec-assets-package --access public',
+  'node ./scripts/verify-published-codec-assets.mjs',
+  'npm publish --access public',
+];
+const trustedPublishPositions = trustedPublishSteps.map((step) =>
+  releaseWorkflow.indexOf(step),
+);
+const trustedPublishOrderIsValid = trustedPublishPositions.every(
+  (position, index) =>
+    position >= 0 &&
+    (index === 0 || position > trustedPublishPositions[index - 1]),
+);
+
 if (
   packageJson.scripts?.prepublishOnly !==
     'node ./scripts/verify-release-state.mjs && pnpm codec-assets:verify-published' ||
@@ -237,11 +252,16 @@ if (
     'node ./scripts/build-codec-asset-package.mjs --release && node ./scripts/verify-codec-asset-package.mjs --release && npm pack --dry-run --json ./.artifacts/codec-assets-package' ||
   packageJson.scripts?.['codec-assets:verify-published'] !==
     'pnpm build && node ./scripts/verify-published-codec-assets.mjs' ||
-  releaseWorkflow.includes('npm publish') ||
-  releaseWorkflow.includes('publish-npm')
+  !releaseWorkflow.includes('id-token: write') ||
+  !releaseWorkflow.includes('runs-on: ubuntu-latest') ||
+  !releaseWorkflow.includes("needs.release-please.outputs.release_created == 'true'") ||
+  !releaseWorkflow.includes('inputs.tag || needs.release-please.outputs.tag_name') ||
+  releaseWorkflow.includes('NODE_AUTH_TOKEN') ||
+  releaseWorkflow.includes('NPM_TOKEN') ||
+  !trustedPublishOrderIsValid
 ) {
   throw new Error(
-    'Release automation must stop after Release Please and engine publication must verify the published codec assets',
+    'Release automation must publish the exact tag through npm OIDC in codec, jsDelivr verification, and engine order',
   );
 }
 
