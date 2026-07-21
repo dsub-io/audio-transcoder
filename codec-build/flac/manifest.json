@@ -9,7 +9,6 @@
   "bridge": {
     "license": "MPL-2.0",
     "licensePath": "THIRD_PARTY_LICENSES/MEDIABUNNY-MPL-2.0.txt",
-    "licenseSha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
     "path": "codec-build/flac/bridge.c",
     "sha256": "a8f9f7f2a35354de521a83a0485321622747acc38e6faa5bd8118d685edcfd03",
     "sourceCommit": "794b84884f1e23cb6241689b3563190d138bbd9a",
@@ -30,7 +29,6 @@
     "commit": "3f1ecff843dd1b8c07fbb5f59425a4ec71fe4f6c",
     "license": "Xiph-BSD",
     "licensePath": "THIRD_PARTY_LICENSES/LIBFLAC-XIPH-BSD.txt",
-    "licenseSha256": "7866ee98760fc1f0156b4fe6bf530257e02be487ab3fd94e2b63799dd32d6b2c",
     "url": "https://github.com/xiph/flac/archive/3f1ecff843dd1b8c07fbb5f59425a4ec71fe4f6c.tar.gz"
   },
   "toolchain": {

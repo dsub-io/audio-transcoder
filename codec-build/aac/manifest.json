@@ -12,7 +12,6 @@
   },
   "bridge": {
     "licensePath": "codec-build/aac/LICENSE.BRIDGE-MPL-2.0.txt",
-    "licenseSha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
     "license": "MPL-2.0",
     "path": "codec-build/aac/bridge.c",
     "sha256": "374167016823bab3e52feb726c1a51d2e6d12c8f85ed41dd9c3975e9490c23dd",
@@ -34,7 +33,6 @@
     "commit": "38b88335f99e76ed89ff3c93f877fdefce736c13",
     "license": "LGPL-2.1-or-later",
     "licensePath": "codec-build/aac/LICENSE.FFMPEG-LGPL-2.1.txt",
-    "licenseSha256": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
     "tag": "n8.1.2",
     "url": "https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz"
   },

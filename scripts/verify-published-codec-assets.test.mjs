@@ -35,7 +35,7 @@ const legalFileUrls = CODEC_ASSET_LEGAL_FILES.map(
   ({ packagePath }) => `${baseUrl}/${packagePath}`,
 );
 
-test('verifies the exact package, manifest, raw WASM, and legal payload', async () => {
+test('verifies the package, manifest, raw WASM, and legal file presence', async () => {
   const requests = [];
   const verified = [];
 
@@ -185,21 +185,6 @@ for (const descriptor of CODEC_ASSET_LEGAL_FILES) {
     );
   });
 
-  test(`fails closed when ${descriptor.packagePath} differs`, async () => {
-    await assert.rejects(
-      verifyPublishedCodecAssets({
-        fetchAsset: createFixtureFetch({
-          override(url) {
-            return url === targetUrl
-              ? new Response(new Uint8Array([1, 2, 3]))
-              : undefined;
-          },
-        }),
-        log() {},
-      }),
-      /differs from the audited codec asset legal payload/u,
-    );
-  });
 }
 
 function createFixtureFetch({

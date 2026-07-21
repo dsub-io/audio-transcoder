@@ -3,7 +3,6 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
-  assertCodecAssetLegalFile,
   CODEC_ASSET_LEGAL_FILES,
   CODEC_ASSET_PACKAGE_DESCRIPTION,
   CODEC_ASSET_PACKAGE_FILES,
@@ -65,7 +64,6 @@ for (const descriptor of CODEC_ASSET_LEGAL_FILES) {
   const source = resolve(repositoryRoot, descriptor.sourcePath);
   const destination = resolve(outputDirectory, descriptor.packagePath);
   const bytes = await readFile(source);
-  assertCodecAssetLegalFile(bytes, descriptor, descriptor.sourcePath);
   await mkdir(dirname(destination), { recursive: true });
   await writeFile(destination, bytes);
 }

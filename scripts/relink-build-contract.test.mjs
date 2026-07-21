@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { access, mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { promisify } from 'node:util';
@@ -45,6 +47,25 @@ test('all relink builders reject output inside the repository', async () => {
       /--output-dir must be outside the repository/u,
       script,
     );
+  }
+});
+
+test('rejected output directories are not created before validation', async (context) => {
+  const parent = await mkdtemp(join(repositoryRoot, '.relink-contract-'));
+  const rejectedDirectory = join(parent, 'must-not-be-created');
+  context.after(() => rm(parent, { force: true, recursive: true }));
+
+  for (const script of scripts) {
+    await assert.rejects(
+      execFileAsync(`${repositoryRoot}/${script}`, [
+        '--relink',
+        '--output-dir',
+        rejectedDirectory,
+      ]),
+      /--output-dir must be an existing directory/u,
+      script,
+    );
+    await assert.rejects(access(rejectedDirectory), undefined, script);
   }
 });
 

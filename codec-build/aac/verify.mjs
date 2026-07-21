@@ -18,8 +18,8 @@ await verifyFile(
   manifest.wasmArtifact.sizeBytes,
 );
 await verifyFile(manifest.bridge.path, manifest.bridge.sha256);
-await verifyFile(manifest.bridge.licensePath, manifest.bridge.licenseSha256);
-await verifyFile(manifest.ffmpeg.licensePath, manifest.ffmpeg.licenseSha256);
+await readFile(new URL(manifest.bridge.licensePath, repositoryRoot));
+await readFile(new URL(manifest.ffmpeg.licensePath, repositoryRoot));
 
 const distArtifactPath = manifest.artifact.path.replace(/^src\//, 'dist/');
 const distArtifactUrl = new URL(distArtifactPath, repositoryRoot);

@@ -68,13 +68,16 @@ if [ "$MODE" = relink ] && [ -z "$OUTPUT_DIRECTORY" ]; then
   exit 2
 fi
 
-REPOSITORY_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+REPOSITORY_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 if [ -n "$SOURCE_DIRECTORY" ]; then
-  SOURCE_DIRECTORY=$(CDPATH= cd -- "$SOURCE_DIRECTORY" && pwd -P)
+  SOURCE_DIRECTORY=$(CDPATH='' cd -- "$SOURCE_DIRECTORY" && pwd -P)
 fi
 if [ -n "$OUTPUT_DIRECTORY" ]; then
-  mkdir -p "$OUTPUT_DIRECTORY"
-  OUTPUT_DIRECTORY=$(CDPATH= cd -- "$OUTPUT_DIRECTORY" && pwd -P)
+  if [ ! -d "$OUTPUT_DIRECTORY" ]; then
+    echo '--output-dir must be an existing directory.' >&2
+    exit 2
+  fi
+  OUTPUT_DIRECTORY=$(CDPATH='' cd -- "$OUTPUT_DIRECTORY" && pwd -P)
   case "$OUTPUT_DIRECTORY/" in
     "$REPOSITORY_ROOT/"*)
       echo '--output-dir must be outside the repository.' >&2
@@ -101,7 +104,7 @@ BUILD_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/dsub-ogg-opus.XXXXXX")
 trap 'rm -rf "$BUILD_ROOT"' EXIT HUP INT TERM
 
 # emsdk_env.sh is the supported way to select the pinned compiler toolchain.
-# shellcheck disable=SC1090
+# shellcheck disable=SC1091
 . "$OGG_OPUS_EMSDK_ROOT/emsdk_env.sh" >/dev/null
 
 sha256_file() {
@@ -161,7 +164,7 @@ tar -xzf "$LIBOPUS_ARCHIVE" -C "$BUILD_ROOT/source"
 tar -xJf "$LIBOGG_ARCHIVE" -C "$BUILD_ROOT/source"
 
 COMMON_CFLAGS="-Oz -flto -DNDEBUG"
-export CFLAGS=$COMMON_CFLAGS
+export CFLAGS="$COMMON_CFLAGS"
 export CPPFLAGS="-I$BUILD_ROOT/prefix/include"
 export LDFLAGS="-L$BUILD_ROOT/prefix/lib -flto"
 export PKG_CONFIG_PATH="$BUILD_ROOT/prefix/lib/pkgconfig"

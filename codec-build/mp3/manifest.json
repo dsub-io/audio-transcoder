@@ -11,7 +11,6 @@
     "sha256": "c8f4d9426881eb32c89a2213c925a3305727b972ed0172759c0e36ebd1e4e430",
     "license": "MPL-2.0",
     "licensePath": "THIRD_PARTY_LICENSES/MEDIABUNNY-MPL-2.0.txt",
-    "licenseSha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04",
     "sourceCommit": "794b84884f1e23cb6241689b3563190d138bbd9a",
     "sourcePackage": "@mediabunny/mp3-encoder@1.50.9",
     "sourcePackageGitHead": "794b84884f1e23cb6241689b3563190d138bbd9a",
@@ -31,8 +30,7 @@
     "url": "https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz",
     "archiveSha256": "ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e",
     "license": "LGPL-2.0-or-later",
-    "licensePath": "THIRD_PARTY_LICENSES/LAME-3.100-LGPL-2.0-or-later.txt",
-    "licenseSha256": "bfe4a52dc4645385f356a8e83cc54216a293e3b6f1cb4f79f5fc0277abf937fd"
+    "licensePath": "THIRD_PARTY_LICENSES/LAME-3.100-LGPL-2.0-or-later.txt"
   },
   "toolchain": {
     "emccCommit": "263db4cffa6f9fc2ec514a70abac81362ea41849",

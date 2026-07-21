@@ -72,7 +72,7 @@ if [ "${1:-}" = "--compile" ]; then
   exit 0
 fi
 
-REPOSITORY_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+REPOSITORY_ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 MODE=verify-reproduction
 MODE_WAS_SET=false
 SOURCE_DIRECTORY=
@@ -134,11 +134,14 @@ if [ "$MODE" = relink ] && [ -z "$OUTPUT_DIRECTORY" ]; then
 fi
 
 if [ -n "$SOURCE_DIRECTORY" ]; then
-  SOURCE_DIRECTORY=$(CDPATH= cd -- "$SOURCE_DIRECTORY" && pwd -P)
+  SOURCE_DIRECTORY=$(CDPATH='' cd -- "$SOURCE_DIRECTORY" && pwd -P)
 fi
 if [ -n "$OUTPUT_DIRECTORY" ]; then
-  mkdir -p "$OUTPUT_DIRECTORY"
-  OUTPUT_DIRECTORY=$(CDPATH= cd -- "$OUTPUT_DIRECTORY" && pwd -P)
+  if [ ! -d "$OUTPUT_DIRECTORY" ]; then
+    echo '--output-dir must be an existing directory.' >&2
+    exit 2
+  fi
+  OUTPUT_DIRECTORY=$(CDPATH='' cd -- "$OUTPUT_DIRECTORY" && pwd -P)
   case "$OUTPUT_DIRECTORY/" in
     "$REPOSITORY_ROOT/"*)
       echo '--output-dir must be outside the repository.' >&2

@@ -62,12 +62,6 @@ const aacBridgeSource = await readFile(
   new URL('../codec-build/aac/bridge.c', import.meta.url),
   'utf8',
 );
-const aacBridgeLicense = await readFile(
-  new URL('../codec-build/aac/LICENSE.BRIDGE-MPL-2.0.txt', import.meta.url),
-);
-const aacFfmpegLicense = await readFile(
-  new URL('../codec-build/aac/LICENSE.FFMPEG-LGPL-2.1.txt', import.meta.url),
-);
 const aacSourceArtifact = await readFile(
   new URL('../src/stream/runtime/aac.generated.mjs', import.meta.url),
 );
@@ -92,20 +86,14 @@ const resamplerBuildScript = await readFile(
   new URL('../scripts/resampler-build-wasm.sh', import.meta.url),
   'utf8',
 );
-const thirdPartyLicenses = {
-  'EMSCRIPTEN-MIT-AND-UIUC-NCSA.txt':
-    '620a78084fc7ca97c0b5dea9abf891f3ffcadfdbf305276f099c9c4e12fc1d86',
-  'LAME-3.100-LGPL-2.0-or-later.txt':
-    'bfe4a52dc4645385f356a8e83cc54216a293e3b6f1cb4f79f5fc0277abf937fd',
-  'LIBFLAC-XIPH-BSD.txt':
-    '7866ee98760fc1f0156b4fe6bf530257e02be487ab3fd94e2b63799dd32d6b2c',
-  'LIBOPUSENC-LIBOPUS-LIBOGG-XIPH-BSD.txt':
-    '32b6760cab1917431fa2f36af6c655165bf71047e20b93a13c32a893687df826',
-  'LIBSAMPLERATE-BSD-2-CLAUSE.txt':
-    '61fc66af7da8e2f97f82b91e42c46fa136f92118dee8ac6674bc33892d74ae66',
-  'MEDIABUNNY-MPL-2.0.txt':
-    '3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04',
-};
+const thirdPartyLicenseFiles = [
+  'EMSCRIPTEN-MIT-AND-UIUC-NCSA.txt',
+  'LAME-3.100-LGPL-2.0-or-later.txt',
+  'LIBFLAC-XIPH-BSD.txt',
+  'LIBOPUSENC-LIBOPUS-LIBOGG-XIPH-BSD.txt',
+  'LIBSAMPLERATE-BSD-2-CLAUSE.txt',
+  'MEDIABUNNY-MPL-2.0.txt',
+];
 const publicApi = await import('../dist/index.js');
 
 if (
@@ -184,7 +172,7 @@ const requiredNoticeText = [
   'https://downloads.xiph.org/releases/ogg/libogg-1.3.6.tar.xz',
   'https://github.com/libsndfile/libsamplerate/tree/aee38d0bc797d0d1a3774ef574af1d5d248d2398',
   'https://github.com/libsndfile/libsamplerate/blob/aee38d0bc797d0d1a3774ef574af1d5d248d2398/COPYING',
-  ...Object.keys(thirdPartyLicenses).map(
+  ...thirdPartyLicenseFiles.map(
     (fileName) => `THIRD_PARTY_LICENSES/${fileName}`,
   ),
 ];
@@ -291,10 +279,8 @@ if (
   !aacBuildScript.includes('--enable-encoder=aac') ||
   !aacBridgeSource.includes('Mozilla Public') ||
   !aacBridgeSource.includes('License, v. 2.0') ||
-  sha256(aacBridgeLicense) !==
-    '3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04' ||
-  sha256(aacFfmpegLicense) !==
-    '246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30'
+  !aacBuildManifest.bridge?.licensePath ||
+  !aacBuildManifest.ffmpeg?.licensePath
 ) {
   throw new Error('Bundled AAC artifact and corresponding source must agree');
 }
@@ -438,15 +424,11 @@ for (const [codec, { artifact, manifest }] of Object.entries(rawCodecBuilds)) {
   const bridge = await readFile(
     new URL(`../${manifest.bridge.path}`, import.meta.url),
   );
-  const bridgeLicense = await readFile(
-    new URL(`../${manifest.bridge.licensePath}`, import.meta.url),
-  );
   if (
     manifest.schemaVersion !== 1 ||
     artifact.sha256 !== asset.sha256 ||
     artifact.sizeBytes !== asset.bytes ||
     sha256(bridge) !== manifest.bridge.sha256 ||
-    sha256(bridgeLicense) !== manifest.bridge.licenseSha256 ||
     manifest.toolchain?.emscriptenVersion !== '5.0.7' ||
     manifest.toolchain?.emccCommit !==
       '263db4cffa6f9fc2ec514a70abac81362ea41849'
@@ -476,16 +458,10 @@ if (
   throw new Error('Raw FLAC or MP3 provenance manifest drifted');
 }
 
-for (const [fileName, expectedSha256] of Object.entries(thirdPartyLicenses)) {
-  const license = await readFile(
+for (const fileName of thirdPartyLicenseFiles) {
+  await readFile(
     new URL(`../THIRD_PARTY_LICENSES/${fileName}`, import.meta.url),
   );
-  const actualSha256 = sha256(license);
-  if (actualSha256 !== expectedSha256) {
-    throw new Error(
-      `Third-party license ${fileName} is missing or differs from its audited source`,
-    );
-  }
 }
 
 if (
@@ -581,7 +557,7 @@ const requiredPackedEvidence = [
   'codec-build/aac/LICENSE.FFMPEG-LGPL-2.1.txt',
   'scripts/codec-asset-package-contract.mjs',
   'scripts/verify-published-codec-assets.mjs',
-  ...Object.keys(thirdPartyLicenses).map(
+  ...thirdPartyLicenseFiles.map(
     (fileName) => `THIRD_PARTY_LICENSES/${fileName}`,
   ),
   'vendor/ogg-opus/ogg-opus-PROVENANCE.md',

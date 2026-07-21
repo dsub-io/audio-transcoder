@@ -8,8 +8,10 @@ readonly SOURCE_EPOCH='1781664417'
 readonly EXPECTED_GLUE_SHA256='4af4035a226a9adbc94d6f2f59eda479394b8d8d4abf61b851c30bd55b24f171'
 readonly EXPECTED_WASM_SHA256='90c75819c422afbbb2feb0ba8e9e4ec94a004d800799cfa083182359e5497efc'
 
-readonly SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPOSITORY_ROOT="$(cd "${SCRIPT_DIRECTORY}/../.." && pwd)"
+SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIRECTORY
+REPOSITORY_ROOT="$(cd "${SCRIPT_DIRECTORY}/../.." && pwd)"
+readonly REPOSITORY_ROOT
 
 mode='verify-reproduction'
 mode_was_set='false'
@@ -85,7 +87,8 @@ if [[ -n "${source_tree}" && "${mode}" != 'relink' ]]; then
   exit 2
 fi
 
-readonly REPOSITORY_ROOT_REAL="$(cd "${REPOSITORY_ROOT}" && pwd -P)"
+REPOSITORY_ROOT_REAL="$(cd "${REPOSITORY_ROOT}" && pwd -P)"
+readonly REPOSITORY_ROOT_REAL
 if [[ -n "${source_directory}" ]]; then
   source_directory="$(cd "${source_directory}" && pwd -P)"
 fi
@@ -97,7 +100,10 @@ if [[ -z "${output_directory}" ]]; then
   readonly GLUE_OUTPUT_PATH="${REPOSITORY_ROOT}/src/stream/runtime/aac.generated.mjs"
   readonly WASM_OUTPUT_PATH="${SCRIPT_DIRECTORY}/aac.wasm"
 else
-  mkdir -p "${output_directory}"
+  if [[ ! -d "${output_directory}" ]]; then
+    echo '--output-dir must be an existing directory.' >&2
+    exit 2
+  fi
   output_directory="$(cd "${output_directory}" && pwd -P)"
   case "${output_directory}/" in
     "${REPOSITORY_ROOT_REAL}/"*)
@@ -109,7 +115,8 @@ else
   readonly WASM_OUTPUT_PATH="${output_directory}/aac.wasm"
 fi
 
-readonly BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dsub-aac-build.XXXXXX")"
+BUILD_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/dsub-aac-build.XXXXXX")"
+readonly BUILD_ROOT
 
 cleanup() {
   rm -rf "${BUILD_ROOT}"

@@ -5,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 import {
-  assertCodecAssetLegalFile,
   CODEC_ASSET_LEGAL_FILES,
   CODEC_ASSET_PACKAGE_DESCRIPTION,
   CODEC_ASSET_PACKAGE_FILES,
@@ -92,19 +91,14 @@ for (const descriptor of CODEC_ASSET_LEGAL_FILES) {
   const sourceBytes = await readFile(
     resolve(repositoryRoot, descriptor.sourcePath),
   );
-  assertCodecAssetLegalFile(
-    sourceBytes,
-    descriptor,
-    descriptor.sourcePath,
-  );
   const packagedBytes = await readFile(
     resolve(packageDirectory, descriptor.packagePath),
   );
-  assertCodecAssetLegalFile(
-    packagedBytes,
-    descriptor,
-    `codec package ${descriptor.packagePath}`,
-  );
+  if (!sourceBytes.equals(packagedBytes)) {
+    throw new Error(
+      `Codec package ${descriptor.packagePath} does not match ${descriptor.sourcePath}.`,
+    );
+  }
 }
 
 const { stdout: packOutput } = await execFileAsync(

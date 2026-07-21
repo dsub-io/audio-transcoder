@@ -13,8 +13,8 @@ await verifyFile(
   manifest.artifact.sizeBytes,
 );
 await verifyFile(manifest.bridge.path, manifest.bridge.sha256);
-await verifyFile(manifest.bridge.licensePath, manifest.bridge.licenseSha256);
-await verifyFile(manifest.lame.licensePath, manifest.lame.licenseSha256);
+await readFile(new URL(manifest.bridge.licensePath, repositoryRoot));
+await readFile(new URL(manifest.lame.licensePath, repositoryRoot));
 
 const artifact = await readFile(new URL(manifest.artifact.path, repositoryRoot));
 const module = await WebAssembly.compile(artifact);

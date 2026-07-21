@@ -39,6 +39,26 @@ test('rejects a tag that is not at HEAD', async (context) => {
   );
 });
 
+test('rejects a tag that is not published by the canonical repository at HEAD', async (context) => {
+  const root = await fixture(context, '1.2.3');
+  await assert.rejects(
+    verifyReleaseState({
+      repositoryRoot: root,
+      execFile: gitStub({ remoteTaggedCommit: 'abcdef1234567890abcdef1234567890abcdef12' }),
+    }),
+    /Public v1\.2\.3 resolves to/u,
+  );
+});
+
+test('accepts an annotated public tag peeled to HEAD', async (context) => {
+  const root = await fixture(context, '1.2.3');
+  const state = await verifyReleaseState({
+    repositoryRoot: root,
+    execFile: gitStub({ annotatedTagObject: 'abcdef1234567890abcdef1234567890abcdef12' }),
+  });
+  assert.deepEqual(state, { head: HEAD, tag: 'v1.2.3', version: '1.2.3' });
+});
+
 test('rejects non-exact versions', async (context) => {
   const root = await fixture(context, '0.0.0-development');
   await assert.rejects(
@@ -54,7 +74,12 @@ async function fixture(context, version) {
   return root;
 }
 
-function gitStub({ status = '', taggedCommit = HEAD } = {}) {
+function gitStub({
+  annotatedTagObject,
+  remoteTaggedCommit = HEAD,
+  status = '',
+  taggedCommit = HEAD,
+} = {}) {
   return async (_file, arguments_) => {
     const command = arguments_.join(' ');
     if (command === 'status --porcelain=v1 --untracked-files=all') {
@@ -65,6 +90,16 @@ function gitStub({ status = '', taggedCommit = HEAD } = {}) {
     }
     if (command === 'rev-parse --verify refs/tags/v1.2.3^{commit}') {
       return { stdout: `${taggedCommit}\n` };
+    }
+    if (
+      command ===
+      'ls-remote --exit-code https://github.com/dsub-io/audio-transcoder.git refs/tags/v1.2.3 refs/tags/v1.2.3^{}'
+    ) {
+      const direct = annotatedTagObject ?? remoteTaggedCommit;
+      const peeled = annotatedTagObject
+        ? `${remoteTaggedCommit}\trefs/tags/v1.2.3^{}\n`
+        : '';
+      return { stdout: `${direct}\trefs/tags/v1.2.3\n${peeled}` };
     }
     throw new Error(`Unexpected git command: ${command}`);
   };

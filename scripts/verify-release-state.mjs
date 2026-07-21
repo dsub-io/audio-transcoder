@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFileCallback);
 const DEFAULT_REPOSITORY_ROOT = fileURLToPath(new URL('../', import.meta.url));
+const CANONICAL_RELEASE_REPOSITORY = 'https://github.com/dsub-io/audio-transcoder.git';
 const EXACT_SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
 export async function verifyReleaseState({
@@ -45,7 +46,38 @@ export async function verifyReleaseState({
     throw new Error(`${tag} resolves to ${taggedCommit}, but HEAD is ${head}.`);
   }
 
+  const remoteTag = await git(execFile, root, [
+    'ls-remote',
+    '--exit-code',
+    CANONICAL_RELEASE_REPOSITORY,
+    `refs/tags/${tag}`,
+    `refs/tags/${tag}^{}`,
+  ]);
+  const remoteTaggedCommit = resolveRemoteTaggedCommit(remoteTag, tag);
+  if (head !== remoteTaggedCommit) {
+    throw new Error(`Public ${tag} resolves to ${remoteTaggedCommit}, but HEAD is ${head}.`);
+  }
+
   return Object.freeze({ head, tag, version });
+}
+
+function resolveRemoteTaggedCommit(output, tag) {
+  const directReference = `refs/tags/${tag}`;
+  const peeledReference = `${directReference}^{}`;
+  const references = new Map(
+    output.split(/\r?\n/u).map((line) => {
+      const [object, reference, ...extra] = line.split(/\s+/u);
+      if (!object || !reference || extra.length > 0) {
+        throw new Error(`Unexpected public tag response: ${JSON.stringify(line)}.`);
+      }
+      return [reference, object];
+    }),
+  );
+  const commit = references.get(peeledReference) ?? references.get(directReference);
+  if (!commit) {
+    throw new Error(`Public repository has no exact ${directReference} reference.`);
+  }
+  return commit;
 }
 
 async function git(execFile, cwd, arguments_) {
