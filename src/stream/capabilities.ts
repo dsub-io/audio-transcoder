@@ -1,6 +1,9 @@
 import {
+  AAC_OUTPUT_PRESET_DESCRIPTORS,
+  AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS,
   FLAC_OUTPUT_PRESET_DESCRIPTORS,
   MP3_OUTPUT_PRESET_DESCRIPTORS,
+  OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS,
   STREAM_OUTPUT_PRESETS,
   WAV_STREAM_OUTPUT_PRESET_DESCRIPTORS,
   type StreamLosslessOutputPresetDescriptor,
@@ -127,7 +130,7 @@ export type AudioStreamOutputPresetDescriptor =
   | AudioStreamLosslessOutputPresetDescriptor
   | AudioStreamLossyOutputPresetDescriptor;
 
-export type AudioStreamOutputImplementation = 'built-in' | 'bundled-wasm';
+export type AudioStreamOutputImplementation = 'built-in' | 'runtime-asset';
 export type AudioStreamOutputLoading = 'eager' | 'lazy';
 export type AudioStreamOutputStreamingMode = 'bounded-memory';
 /** Known format IDs; installed availability is determined by `outputFormats`. */
@@ -150,20 +153,20 @@ export interface AudioStreamBuiltInOutputFormatDescriptor
   readonly loading: 'eager';
 }
 
-/** Output implemented by a bundled WASM module loaded on first use. */
-export interface AudioStreamBundledWasmOutputFormatDescriptor
+/** Output implemented by a separately delivered runtime asset loaded on first use. */
+export interface AudioStreamRuntimeAssetOutputFormatDescriptor
   extends AudioStreamOutputFormatDescriptorBase {
-  readonly implementation: 'bundled-wasm';
+  readonly implementation: 'runtime-asset';
   readonly loading: 'lazy';
 }
 
 /**
- * Deterministic output support bundled with this build. Runtime-probed
+ * Deterministic output support declared by this build. Runtime-probed
  * candidates must not be included in this list.
  */
 export type AudioStreamOutputFormatDescriptor =
   | AudioStreamBuiltInOutputFormatDescriptor
-  | AudioStreamBundledWasmOutputFormatDescriptor;
+  | AudioStreamRuntimeAssetOutputFormatDescriptor;
 
 export interface AudioStreamLimits {
   /** Per-read and per-yield allocation bounds, not a total working-set limit. */
@@ -351,6 +354,25 @@ const WAV_OUTPUT_PRESETS = Object.freeze([
   losslessOutputPreset(WAV_STREAM_OUTPUT_PRESET_DESCRIPTORS[3]),
 ] as const);
 
+const AIFF_OUTPUT_PRESETS = Object.freeze([
+  losslessOutputPreset(AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS[0]),
+  losslessOutputPreset(AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS[1]),
+] as const);
+
+const AAC_OUTPUT_PRESETS = Object.freeze([
+  lossyOutputPreset(AAC_OUTPUT_PRESET_DESCRIPTORS[0]),
+  lossyOutputPreset(AAC_OUTPUT_PRESET_DESCRIPTORS[1]),
+  lossyOutputPreset(AAC_OUTPUT_PRESET_DESCRIPTORS[2]),
+  lossyOutputPreset(AAC_OUTPUT_PRESET_DESCRIPTORS[3]),
+] as const);
+
+const OGG_OPUS_OUTPUT_PRESETS = Object.freeze([
+  lossyOutputPreset(OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS[0]),
+  lossyOutputPreset(OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS[1]),
+  lossyOutputPreset(OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS[2]),
+  lossyOutputPreset(OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS[3]),
+] as const);
+
 const MP3_OUTPUT_PRESETS = Object.freeze([
   lossyOutputPreset(MP3_OUTPUT_PRESET_DESCRIPTORS[0]),
   lossyOutputPreset(MP3_OUTPUT_PRESET_DESCRIPTORS[1]),
@@ -376,10 +398,43 @@ export const AUDIO_STREAM_OUTPUT_FORMATS = Object.freeze([
     streaming: 'bounded-memory',
   }),
   Object.freeze({
+    container: 'aiff',
+    extension: 'aiff',
+    id: 'aiff',
+    implementation: 'built-in',
+    loading: 'eager',
+    mimeType: 'audio/aiff',
+    presets: AIFF_OUTPUT_PRESETS,
+    requiresSeekableOutput: true,
+    streaming: 'bounded-memory',
+  }),
+  Object.freeze({
+    container: 'adts',
+    extension: 'aac',
+    id: 'aac',
+    implementation: 'runtime-asset',
+    loading: 'lazy',
+    mimeType: 'audio/aac',
+    presets: AAC_OUTPUT_PRESETS,
+    requiresSeekableOutput: false,
+    streaming: 'bounded-memory',
+  }),
+  Object.freeze({
+    container: 'ogg',
+    extension: 'ogg',
+    id: 'ogg',
+    implementation: 'runtime-asset',
+    loading: 'lazy',
+    mimeType: 'audio/ogg',
+    presets: OGG_OPUS_OUTPUT_PRESETS,
+    requiresSeekableOutput: false,
+    streaming: 'bounded-memory',
+  }),
+  Object.freeze({
     container: 'mp3',
     extension: 'mp3',
     id: 'mp3',
-    implementation: 'bundled-wasm',
+    implementation: 'runtime-asset',
     loading: 'lazy',
     mimeType: 'audio/mpeg',
     presets: MP3_OUTPUT_PRESETS,
@@ -390,7 +445,7 @@ export const AUDIO_STREAM_OUTPUT_FORMATS = Object.freeze([
     container: 'flac',
     extension: 'flac',
     id: 'flac',
-    implementation: 'bundled-wasm',
+    implementation: 'runtime-asset',
     loading: 'lazy',
     mimeType: 'audio/flac',
     presets: FLAC_OUTPUT_PRESETS,

@@ -3,6 +3,10 @@ import {
   createOperationAbortedError,
 } from '../engine/operation-errors.js';
 import { AudioTranscoderError } from '../errors.js';
+import {
+  cleanupOperationResultAfterAbort,
+  raceWithOperationAbort,
+} from './abortable-operation.js';
 import type {
   AudioStreamOutputProbeTarget,
   AudioStreamOutputSupportResult,
@@ -259,18 +263,10 @@ export async function exerciseAudioStreamOutputRuntime(
   let encoder: Awaited<ReturnType<AudioStreamEncoderAdapter['create']>> | null =
     null;
   let phase: AudioStreamUnavailableOutputResult['reason'] = 'encoder-create';
-  const abortEncoder = (): void => {
-    if (encoder !== null) {
-      void encoder
-        .cancel(createOperationAbortedError(signal))
-        .catch(() => undefined);
-    }
-  };
-  signal.addEventListener('abort', abortEncoder);
 
   try {
     throwIfAborted(signal);
-    encoder = await encoderAdapter.create({
+    const encoderCreation = encoderAdapter.create({
       channels: resolution.target.channels,
       outputChunkBytes: PROBE_OUTPUT_CHUNK_BYTES,
       preset: resolution.preset,
@@ -279,18 +275,30 @@ export async function exerciseAudioStreamOutputRuntime(
       signal,
       writable: output.stream,
     });
+    cleanupOperationResultAfterAbort(
+      encoderCreation,
+      signal,
+      (lateEncoder, reason) => lateEncoder.cancel(reason),
+    );
+    encoder = await raceWithOperationAbort(
+      encoderCreation,
+      signal,
+    );
     throwIfAborted(signal);
 
     phase = 'encoder-start';
-    await encoder.start();
+    await raceWithOperationAbort(encoder.start(), signal);
     throwIfAborted(signal);
 
     phase = 'encoder-write';
-    await encoder.write(createProbeSamples(resolution.target.channels), 0);
+    await raceWithOperationAbort(
+      encoder.write(createProbeSamples(resolution.target.channels), 0),
+      signal,
+    );
     throwIfAborted(signal);
 
     phase = 'encoder-finalize';
-    await encoder.finalize();
+    await raceWithOperationAbort(encoder.finalize(), signal);
     throwIfAborted(signal);
     if (
       output.getBytesReceived() === 0 ||
@@ -303,8 +311,15 @@ export async function exerciseAudioStreamOutputRuntime(
     }
     return SUPPORTED_OUTPUT_RESULT;
   } catch (error) {
-    await encoder?.cancel(error).catch(() => undefined);
-    await abortDiscardOutput(output.stream, error);
+    if (encoder !== null) {
+      await raceWithOperationAbort(encoder.cancel(error), signal).catch(
+        () => undefined,
+      );
+    }
+    await raceWithOperationAbort(
+      abortDiscardOutput(output.stream, error),
+      signal,
+    ).catch(() => undefined);
     if (signal.aborted) {
       throw createOperationAbortedError(signal);
     }
@@ -312,8 +327,6 @@ export async function exerciseAudioStreamOutputRuntime(
       throw error;
     }
     return runtimeUnavailableResult(phase, error);
-  } finally {
-    signal.removeEventListener('abort', abortEncoder);
   }
 }
 

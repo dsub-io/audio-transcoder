@@ -7,6 +7,7 @@ import type {
   AudioStreamWorkerResponse,
 } from './protocol.js';
 import { serializeWorkerError } from '../worker/serialized-error.js';
+import { AudioTranscoderError } from '../errors.js';
 
 interface CreateStreamWorkerMessageHandlerOptions {
   readonly engine: AudioTranscoderStreamEngine;
@@ -17,7 +18,7 @@ interface QueuedRequest {
   readonly controller: AbortController;
   readonly request: Exclude<
     AudioStreamWorkerRequest,
-    { readonly type: 'cancel' }
+    { readonly type: 'cancel' | 'configure' }
   >;
 }
 
@@ -50,6 +51,18 @@ export function createStreamWorkerMessageHandler(
 
   return (event): void => {
     const request = event.data;
+    if (request.type === 'configure') {
+      options.postMessage({
+        error: serializeWorkerError(
+          new AudioTranscoderError(
+            'INVALID_CONFIGURATION',
+            'A custom stream Worker cannot be configured with the package codec asset runtime.',
+          ),
+        ),
+        type: 'configuration-error',
+      });
+      return;
+    }
     if (request.type === 'cancel') {
       controllers.get(request.id)?.abort();
       return;
@@ -63,7 +76,10 @@ export function createStreamWorkerMessageHandler(
 
 async function executeOperation(
   options: CreateStreamWorkerMessageHandlerOptions,
-  request: Exclude<AudioStreamWorkerRequest, { readonly type: 'cancel' }>,
+  request: Exclude<
+    AudioStreamWorkerRequest,
+    { readonly type: 'cancel' | 'configure' }
+  >,
   signal: AbortSignal,
 ): Promise<void> {
   try {

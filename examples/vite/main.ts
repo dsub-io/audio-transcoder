@@ -3,6 +3,7 @@ import {
   AUDIO_TRANSCODER_VERSION,
   AudioTranscoderError,
   createAudioTranscoderStreamWorkerEngine,
+  createSelfHostedRuntimeAssetSource,
   type AudioDitherMode,
   type AudioStreamInputSupportResult,
   type AudioStreamInspection,
@@ -92,7 +93,8 @@ type OutputRuntimeStatus =
 type OutputRuntimeGroupStatus =
   | 'checking'
   | 'operational'
-  | 'retryable-error';
+  | 'retryable-error'
+  | 'unprobed';
 
 type OutputControlScope =
   | 'channels'
@@ -170,8 +172,8 @@ const outputRuntimeGroups = new Map<OutputFormatId, OutputRuntimeGroupState>(
   AUDIO_TRANSCODER_STREAM_CAPABILITIES.outputFormats.map(({ id }) => [
     id,
     Object.freeze({
-      message: `Checking the ${id.toUpperCase()} output runtime.`,
-      status: 'checking' as const,
+      message: `${id.toUpperCase()} output will be checked when selected.`,
+      status: 'unprobed' as const,
     }),
   ]),
 );
@@ -205,6 +207,7 @@ let exactOutputRuntime: ExactOutputRuntimeState = Object.freeze({
 
 engineVersion.textContent = AUDIO_TRANSCODER_VERSION;
 configurePresetSelect();
+configureSampleRateSelect();
 syncTargetControls();
 configureFileInput();
 bindEvents();
@@ -216,7 +219,13 @@ void refreshExactOutputRuntime();
 
 function getEngine(): AudioTranscoderStreamWorkerEngine {
   if (engine === undefined) {
-    engine = createAudioTranscoderStreamWorkerEngine();
+    engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: {
+        source: createSelfHostedRuntimeAssetSource(
+          new URL('.', document.baseURI).href,
+        ),
+      },
+    });
   }
   return engine;
 }
@@ -239,6 +248,34 @@ function configurePresetSelect(): void {
   if (productionPreset !== undefined) {
     presetSelect.value = productionPreset.preset.id;
   }
+}
+
+function configureSampleRateSelect(): void {
+  const rates = new Set<number>();
+  for (const format of AUDIO_TRANSCODER_STREAM_CAPABILITIES.outputFormats) {
+    for (const descriptor of format.presets) {
+      const constraint = descriptor.target.sampleRate;
+      if (constraint.kind === 'discrete') {
+        for (const value of constraint.values) rates.add(value);
+      } else {
+        rates.add(constraint.minimum);
+        rates.add(constraint.maximum);
+      }
+    }
+  }
+
+  const fragment = document.createDocumentFragment();
+  const preserve = document.createElement('option');
+  preserve.value = 'preserve';
+  preserve.textContent = 'Preserve';
+  fragment.append(preserve);
+  for (const rate of [...rates].sort((left, right) => left - right)) {
+    const option = document.createElement('option');
+    option.value = String(rate);
+    option.textContent = `${formatNumber(rate / 1_000)} kHz`;
+    fragment.append(option);
+  }
+  sampleRateSelect.replaceChildren(fragment);
 }
 
 function configureFileInput(): void {
@@ -325,6 +362,7 @@ function handleTargetControlsChanged(): void {
   clearOutputAvailabilityErrors();
   syncTargetControls();
   renderAll();
+  void probeOutputRuntimeGroups();
   void refreshExactOutputRuntime();
 }
 
@@ -1109,6 +1147,9 @@ function syncPresetOptions(): void {
     } else if (runtime.status === 'checking') {
       option.disabled = true;
       option.textContent = `${label} (checking)`;
+    } else if (runtime.status === 'unprobed') {
+      option.disabled = false;
+      option.textContent = label;
     } else {
       option.disabled = false;
       option.textContent = label;
@@ -1137,30 +1178,23 @@ function syncNumericOptions(
 async function probeOutputRuntimeGroups(): Promise<void> {
   const controller = startupOutputProbeController;
   const selectedFormat = findOutputFormatDescriptor(presetSelect.value);
-  const formats = [
-    ...(selectedFormat === undefined ? [] : [selectedFormat]),
-    ...AUDIO_TRANSCODER_STREAM_CAPABILITIES.outputFormats.filter(
-      ({ id }) => id !== selectedFormat?.id,
-    ),
-  ];
-
-  for (const format of formats) {
-    if (disposed || controller.signal.aborted) {
-      return;
-    }
-    if (outputRuntimeGroups.get(format.id)?.status !== 'checking') {
-      continue;
-    }
-
-    await probeOutputRuntimeGroup(format, controller);
-    if (disposed || controller.signal.aborted) {
-      return;
-    }
-
-    syncTargetControls();
-    renderAll();
-    await refreshExactOutputRuntime();
+  if (
+    selectedFormat === undefined ||
+    disposed ||
+    controller.signal.aborted ||
+    outputRuntimeGroups.get(selectedFormat.id)?.status !== 'unprobed'
+  ) {
+    return;
   }
+
+  await probeOutputRuntimeGroup(selectedFormat, controller);
+  if (disposed || controller.signal.aborted) {
+    return;
+  }
+
+  syncTargetControls();
+  renderAll();
+  await refreshExactOutputRuntime();
 }
 
 async function probeOutputRuntimeGroup(
@@ -1648,7 +1682,7 @@ function retrySelectedOutputCheck(): void {
     startupOutputProbeController = new AbortController();
     setOutputRuntimeGroup(format.id, {
       message: `Checking the ${format.id.toUpperCase()} output runtime.`,
-      status: 'checking',
+      status: 'unprobed',
     });
     const target = resolveSelectedOutputProbeTarget(descriptor);
     setExactOutputRuntime({
@@ -1922,16 +1956,56 @@ function formatInspection(inspection: AudioStreamInspection): string {
     inspection.channels === null
       ? 'Channels unknown'
       : `${inspection.channels} ch`,
-    inspection.bitDepth === null ? 'Depth unknown' : `${inspection.bitDepth}-bit`,
+    formatSourceEncoding(inspection),
     inspection.durationSeconds === null
       ? 'Duration unknown'
       : formatDuration(inspection.durationSeconds),
   ].join(' / ');
 }
 
+function formatSourceEncoding(inspection: AudioStreamInspection): string {
+  const encoding = inspection.sourceEncoding;
+  if (encoding === undefined || encoding.kind === 'unknown') {
+    return inspection.bitDepth === null
+      ? 'Encoding unknown'
+      : `${inspection.bitDepth}-bit encoding`;
+  }
+  if (encoding.kind === 'lossless-compressed') {
+    const depth = encoding.bitDepth === null ? '' : ` ${encoding.bitDepth}-bit`;
+    return `${encoding.codec.toUpperCase()}${depth} lossless`;
+  }
+  if (encoding.kind === 'lossy-compressed') {
+    const bitrate =
+      encoding.estimatedBitrateBps === null
+        ? ''
+        : ` ~${formatNumber(encoding.estimatedBitrateBps / 1_000)} kbps`;
+    return `${encoding.codec.toUpperCase()}${bitrate} lossy`;
+  }
+
+  const depth = encoding.bitDepth === null ? 'Unknown-depth' : `${encoding.bitDepth}-bit`;
+  const representation =
+    encoding.sampleFormat === 'float'
+      ? 'float'
+      : encoding.signedness === 'signed'
+        ? 'signed integer'
+        : encoding.signedness === 'unsigned'
+          ? 'unsigned integer'
+          : 'integer';
+  const endianness =
+    encoding.endianness === 'big'
+      ? ' BE'
+      : encoding.endianness === 'little'
+        ? ' LE'
+        : '';
+  return `${depth} ${representation}${endianness}`;
+}
+
 function formatPreset(descriptor: OutputPresetDescriptor): string {
   if (descriptor.kind === 'lossy') {
-    return `${descriptor.preset.container.toUpperCase()} ${descriptor.bitrate / 1_000} kbps`;
+    const codec = descriptor.codec.toUpperCase();
+    const container = descriptor.preset.container.toUpperCase();
+    const format = codec === container ? codec : `${codec} (${container})`;
+    return `${format} ${descriptor.bitrate / 1_000} kbps`;
   }
   const format =
     descriptor.preset.sampleFormat === 'float' ? 'float' : 'PCM';

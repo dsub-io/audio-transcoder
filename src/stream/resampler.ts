@@ -1,24 +1,13 @@
-import type { AudioResampleQuality } from './contracts.js';
 import { AudioTranscoderError } from '../errors.js';
+import { createOperationAbortedError } from '../engine/operation-errors.js';
+import {
+  cleanupOperationResultAfterAbort,
+  raceWithOperationAbort,
+} from './abortable-operation.js';
 
-interface SampleRateConverter {
-  destroy(): void;
-  full(
-    input: Float32Array,
-    output?: Float32Array | null,
-    outputLength?: { frames: number } | null,
-  ): Float32Array;
-}
-
-const CONVERTER_TYPES: Readonly<Record<AudioResampleQuality, 0 | 1 | 2>> =
-  Object.freeze({
-    balanced: 1,
-    best: 0,
-    fast: 2,
-  });
-const FLUSH_FRAMES = 16_384;
 const MAX_INPUT_BUFFER_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BUFFER_BYTES = 4 * 1024 * 1024;
+const MAX_CHANNELS = 32;
 const MAX_PASS_THROUGH_RATE = 384_000;
 const MAX_RESAMPLE_RATE = 192_000;
 const MIN_RESAMPLE_RATE = 8_000;
@@ -33,12 +22,49 @@ export interface StreamingResampler {
   process(input: Float32Array): Iterable<Float32Array>;
 }
 
-export async function createStreamingResampler(
+export type StreamingResamplerFactory = (
   channels: number,
   inputSampleRate: number,
   outputSampleRate: number,
-  quality: AudioResampleQuality,
+  signal?: AbortSignal,
+) => Promise<StreamingResampler | null>;
+
+/** Creates a resampler factory backed by one explicit quality-specific asset. */
+export function createStreamingResamplerFactory(
+  loadWasm: import('./resampler-wasm-runtime.js').ResamplerWasmLoader,
+): StreamingResamplerFactory {
+  let sessionFactory:
+    | Promise<import('./resampler-wasm-runtime.js').ResamplerWasmSessionFactory>
+    | undefined;
+  return async (channels, inputSampleRate, outputSampleRate, signal) => {
+    return createStreamingResamplerWithSessionFactory(
+      channels,
+      inputSampleRate,
+      outputSampleRate,
+      async (sessionChannels, ratio, sessionSignal) => {
+        sessionFactory ??= import('./resampler-wasm-runtime.js').then(
+          ({ createResamplerWasmSessionFactory }) =>
+            createResamplerWasmSessionFactory(loadWasm),
+        );
+        return (await sessionFactory)(
+          sessionChannels,
+          ratio,
+          sessionSignal,
+        );
+      },
+      signal,
+    );
+  };
+}
+
+async function createStreamingResamplerWithSessionFactory(
+  channels: number,
+  inputSampleRate: number,
+  outputSampleRate: number,
+  createSession: import('./resampler-wasm-runtime.js').ResamplerWasmSessionFactory,
+  signal?: AbortSignal,
 ): Promise<StreamingResampler | null> {
+  validateChannels(channels);
   if (inputSampleRate === outputSampleRate) {
     validatePassThroughRate(inputSampleRate);
     return null;
@@ -46,14 +72,29 @@ export async function createStreamingResampler(
   validateResampleRate(inputSampleRate, 'inputSampleRate');
   validateResampleRate(outputSampleRate, 'outputSampleRate');
 
-  const converter = await createSampleRateConverter(
-    channels,
-    inputSampleRate,
-    outputSampleRate,
-    quality,
-  );
   const ratio = outputSampleRate / inputSampleRate;
+  let converter:
+    | import('./resampler-wasm-runtime.js').ResamplerWasmSession
+    | null;
+  try {
+    const sessionCreation = createSession(channels, ratio, signal);
+    cleanupOperationResultAfterAbort(
+      sessionCreation,
+      signal,
+      (lateSession) => lateSession.close(),
+    );
+    converter = await raceWithOperationAbort(
+      sessionCreation,
+      signal,
+    );
+  } catch (error: unknown) {
+    if (signal?.aborted) {
+      throw createOperationAbortedError(signal);
+    }
+    throw createResamplerInitializationError(error);
+  }
   let closed = false;
+  let finalized = false;
   let producedFrames = 0;
   let outputBuffer = new Float32Array(0);
   const maxInputFramesByInput = Math.max(
@@ -61,24 +102,45 @@ export async function createStreamingResampler(
     Math.floor(MAX_INPUT_BUFFER_BYTES / FLOAT_BYTES / channels),
   );
   const maxOutputSamples = Math.floor(MAX_OUTPUT_BUFFER_BYTES / FLOAT_BYTES);
+  const maxOutputFrames = Math.floor(maxOutputSamples / channels);
   const maxInputFramesByOutput = Math.max(
     1,
-    Math.floor((maxOutputSamples - channels) / (channels * ratio)),
+    Math.floor((maxOutputFrames - 1) / ratio),
   );
   const maxInputFrames = Math.min(
     maxInputFramesByInput,
     maxInputFramesByOutput,
   );
 
-  const processChunk = (input: Float32Array): Float32Array => {
-    const requiredSamples = Math.ceil(input.length * ratio) + channels;
+  const processChunk = (
+    input: Float32Array,
+    requiredSamples: number,
+    endOfInput: boolean,
+  ): Float32Array => {
+    const activeConverter = converter;
+    if (activeConverter === null) {
+      throw new AudioTranscoderError(
+        'INVALID_CONFIGURATION',
+        'The streaming resampler is already closed.',
+      );
+    }
     if (outputBuffer.length < requiredSamples) {
       outputBuffer = new Float32Array(requiredSamples);
     }
-    const outputLength = { frames: 0 };
-    converter.full(input, outputBuffer, outputLength);
-    producedFrames += outputLength.frames;
-    return outputBuffer.subarray(0, outputLength.frames * channels);
+    const { inputFramesUsed, outputFramesGenerated } = activeConverter.process(
+      input,
+      outputBuffer.subarray(0, requiredSamples),
+      endOfInput,
+    );
+    const inputFrames = input.length / channels;
+    if (inputFramesUsed !== inputFrames) {
+      throw new AudioTranscoderError(
+        'INVALID_AUDIO_DATA',
+        `The sample-rate converter consumed ${inputFramesUsed} of ${inputFrames} input frames.`,
+      );
+    }
+    producedFrames += outputFramesGenerated;
+    return outputBuffer.subarray(0, outputFramesGenerated * channels);
   };
 
   const process = function* (input: Float32Array): Iterable<Float32Array> {
@@ -86,6 +148,12 @@ export async function createStreamingResampler(
       throw new AudioTranscoderError(
         'INVALID_CONFIGURATION',
         'The streaming resampler is already closed.',
+      );
+    }
+    if (finalized) {
+      throw new AudioTranscoderError(
+        'INVALID_CONFIGURATION',
+        'The streaming resampler is already flushed.',
       );
     }
     if (input.length % channels !== 0) {
@@ -102,11 +170,14 @@ export async function createStreamingResampler(
       startFrame += maxInputFrames
     ) {
       const frames = Math.min(maxInputFrames, inputFrames - startFrame);
+      const chunk = input.subarray(
+        startFrame * channels,
+        (startFrame + frames) * channels,
+      );
       const converted = processChunk(
-        input.subarray(
-          startFrame * channels,
-          (startFrame + frames) * channels,
-        ),
+        chunk,
+        (Math.ceil(frames * ratio) + 1) * channels,
+        false,
       );
       if (converted.length > 0) {
         yield converted;
@@ -117,7 +188,8 @@ export async function createStreamingResampler(
   return {
     close(): void {
       if (!closed) {
-        converter.destroy();
+        converter?.close();
+        converter = null;
         closed = true;
         outputBuffer = new Float32Array(0);
       }
@@ -135,36 +207,28 @@ export async function createStreamingResampler(
           'totalInputFrames must be a non-negative safe integer.',
         );
       }
+      if (finalized) return;
+      finalized = true;
       const expectedFrames = Math.floor(totalInputFrames * ratio);
       const requiredFrames = expectedFrames - producedFrames;
       if (requiredFrames <= 0) {
         return;
       }
-
-      const flushBudgetFrames = Math.max(
-        FLUSH_FRAMES,
-        Math.ceil(requiredFrames / ratio) + 1,
-      );
-      let consumedZeroFrames = 0;
       let flushedFrames = 0;
-      while (
-        flushedFrames < requiredFrames &&
-        consumedZeroFrames < flushBudgetFrames
-      ) {
-        const zeroFrames = Math.min(
-          maxInputFrames,
-          flushBudgetFrames - consumedZeroFrames,
-        );
-        consumedZeroFrames += zeroFrames;
-        const flushed = processChunk(new Float32Array(zeroFrames * channels));
-        const availableFrames = Math.min(
-          flushed.length / channels,
+      while (flushedFrames < requiredFrames) {
+        const requestedFrames = Math.min(
+          maxOutputFrames,
           requiredFrames - flushedFrames,
         );
-        if (availableFrames > 0) {
-          flushedFrames += availableFrames;
-          yield flushed.subarray(0, availableFrames * channels);
-        }
+        const flushed = processChunk(
+          new Float32Array(0),
+          requestedFrames * channels,
+          true,
+        );
+        const availableFrames = flushed.length / channels;
+        if (availableFrames === 0) break;
+        flushedFrames += availableFrames;
+        yield flushed;
       }
       if (flushedFrames < requiredFrames) {
         throw new AudioTranscoderError(
@@ -178,27 +242,28 @@ export async function createStreamingResampler(
   };
 }
 
-async function createSampleRateConverter(
-  channels: number,
-  inputSampleRate: number,
-  outputSampleRate: number,
-  quality: AudioResampleQuality,
-): Promise<SampleRateConverter> {
-  try {
-    const { default: LibSampleRate } = await import(
-      '@alexanderolsen/libsamplerate-js'
-    );
-    return (await LibSampleRate.create(
-      channels,
-      inputSampleRate,
-      outputSampleRate,
-      { converterType: CONVERTER_TYPES[quality] },
-    )) as SampleRateConverter;
-  } catch (error: unknown) {
-    const reason = error instanceof Error ? error.message : String(error);
+function createResamplerInitializationError(
+  error: unknown,
+): AudioTranscoderError {
+  if (error instanceof AudioTranscoderError) {
+    return error;
+  }
+  const reason = error instanceof Error ? error.message : String(error);
+  return new AudioTranscoderError(
+    'WORKER_FAILURE',
+    `Failed to initialize the runtime-asset sample-rate converter: ${reason}`,
+  );
+}
+
+function validateChannels(channels: number): void {
+  if (
+    !Number.isSafeInteger(channels) ||
+    channels < 1 ||
+    channels > MAX_CHANNELS
+  ) {
     throw new AudioTranscoderError(
-      'WORKER_FAILURE',
-      `Failed to initialize the bundled sample-rate converter: ${reason}`,
+      'INVALID_CONFIGURATION',
+      `channels must be an integer from 1 to ${MAX_CHANNELS}.`,
     );
   }
 }

@@ -23,6 +23,11 @@ describe('FLAC header inspection', () => {
       durationSeconds: 2,
       notes: ['FLAC audio data requires a browser decoder or codec plugin.'],
       sampleRate: 48_000,
+      sourceEncoding: {
+        bitDepth: 24,
+        codec: 'flac',
+        kind: 'lossless-compressed',
+      },
     });
   });
 
@@ -67,6 +72,11 @@ describe('FLAC header inspection', () => {
         bitDepth: null,
         durationSeconds: null,
         notes: ['FLAC STREAMINFO metadata was not found.'],
+        sourceEncoding: {
+          bitDepth: null,
+          codec: 'flac',
+          kind: 'lossless-compressed',
+        },
       });
     }
     expect(flacInspector.inspect({ data: zeroRate })?.durationSeconds).toBeNull();

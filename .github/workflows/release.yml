@@ -34,3 +34,7 @@ jobs:
           token: ${{ secrets.GH_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+# npm publication is intentionally manual and asset-first. The root package's
+# prepublishOnly gate verifies the exact codec package on jsDelivr before the
+# engine can be published; see README.md "Version and release".

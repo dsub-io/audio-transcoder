@@ -1,12 +1,19 @@
 import type { AudioEncodingConfig } from 'mediabunny';
 import type { AudioOutputPreset } from '../engine/contracts.js';
+import { AIFF_OUTPUT_PRESETS } from './aiff.js';
 import {
   WAV_OUTPUT_PRESET_DESCRIPTORS,
   type WavOutputPresetDescriptor,
 } from './wav-presets.js';
 
-export type BundledWasmOutputCodec = 'flac' | 'mp3';
-export type StreamOutputFormatId = 'flac' | 'mp3' | 'wav';
+export type BundledWasmOutputCodec = 'aac' | 'flac' | 'mp3' | 'ogg-opus';
+export type StreamOutputFormatId =
+  | 'aac'
+  | 'aiff'
+  | 'flac'
+  | 'mp3'
+  | 'ogg'
+  | 'wav';
 
 export interface StreamOutputChannelConstraints {
   readonly maximum: number;
@@ -60,7 +67,22 @@ export const FLAC_OUTPUT_SAMPLE_RATES = Object.freeze([
   192_000,
 ] as const);
 
+export const AAC_OUTPUT_SAMPLE_RATES = Object.freeze([
+  32_000,
+  44_100,
+  48_000,
+] as const);
+
+export const OGG_OPUS_OUTPUT_SAMPLE_RATES = Object.freeze([48_000] as const);
+
 export const WAV_OUTPUT_CODEC_CONSTRAINTS = rangeCodecConstraints(
+  1,
+  32,
+  8_000,
+  384_000,
+);
+
+export const AIFF_OUTPUT_CODEC_CONSTRAINTS = rangeCodecConstraints(
   1,
   32,
   8_000,
@@ -85,14 +107,26 @@ export const FLAC_OUTPUT_CODEC_CONSTRAINTS = discreteCodecConstraints(
   FLAC_OUTPUT_SAMPLE_RATES,
 );
 
+export const AAC_OUTPUT_CODEC_CONSTRAINTS = discreteCodecConstraints(
+  1,
+  2,
+  AAC_OUTPUT_SAMPLE_RATES,
+);
+
+export const OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS = discreteCodecConstraints(
+  1,
+  2,
+  OGG_OPUS_OUTPUT_SAMPLE_RATES,
+);
+
 interface StreamOutputPresetDescriptorBase {
   readonly codec: string;
   readonly constraints: StreamOutputCodecConstraints;
-  /** Exact configuration passed to MediaBunny's `AudioSampleSource`. */
-  readonly encoding: Readonly<AudioEncodingConfig>;
+  /** Exact MediaBunny configuration, or `null` for a built-in stream writer. */
+  readonly encoding: Readonly<AudioEncodingConfig> | null;
   readonly format: StreamOutputFormatId;
   readonly preset: AudioOutputPreset;
-  /** Bundled extension loaded before creating the encoder, or `null` for WAV. */
+  /** Runtime-asset extension loaded before creating the encoder, or `null` when eager. */
   readonly wasmCodec: BundledWasmOutputCodec | null;
 }
 
@@ -128,6 +162,25 @@ export const WAV_STREAM_OUTPUT_PRESET_DESCRIPTORS = Object.freeze([
   defineWavPreset(WAV_OUTPUT_PRESET_DESCRIPTORS[3]),
 ] as const);
 
+export const AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS = Object.freeze([
+  defineAiffPreset('aiff-pcm16', 16, 'pcm-s16be'),
+  defineAiffPreset('aiff-pcm24', 24, 'pcm-s24be'),
+] as const);
+
+export const AAC_OUTPUT_PRESET_DESCRIPTORS = Object.freeze([
+  defineAacPreset('aac-96kbps', 96_000),
+  defineAacPreset('aac-128kbps', 128_000),
+  defineAacPreset('aac-192kbps', 192_000),
+  defineAacPreset('aac-256kbps', 256_000),
+] as const);
+
+export const OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS = Object.freeze([
+  defineOggOpusPreset('ogg-opus-64kbps', 64_000),
+  defineOggOpusPreset('ogg-opus-96kbps', 96_000),
+  defineOggOpusPreset('ogg-opus-128kbps', 128_000),
+  defineOggOpusPreset('ogg-opus-192kbps', 192_000),
+] as const);
+
 export const MP3_OUTPUT_PRESET_DESCRIPTORS = Object.freeze([
   defineMp3Preset(
     'mp3-128kbps',
@@ -158,6 +211,9 @@ export const FLAC_OUTPUT_PRESET_DESCRIPTORS = Object.freeze([
 
 export const STREAM_OUTPUT_PRESET_DESCRIPTORS = Object.freeze([
   ...WAV_STREAM_OUTPUT_PRESET_DESCRIPTORS,
+  ...AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS,
+  ...AAC_OUTPUT_PRESET_DESCRIPTORS,
+  ...OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS,
   ...MP3_OUTPUT_PRESET_DESCRIPTORS,
   ...FLAC_OUTPUT_PRESET_DESCRIPTORS,
 ] as const satisfies readonly StreamOutputPresetDescriptor[]);
@@ -223,6 +279,156 @@ function defineWavPreset<const Descriptor extends WavOutputPresetDescriptor>(
     kind: 'lossless' as const,
     preset: descriptor.preset,
     wasmCodec: null,
+  });
+}
+
+function defineAiffPreset<
+  const Id extends 'aiff-pcm16' | 'aiff-pcm24',
+  const BitDepth extends 16 | 24,
+  const Codec extends 'pcm-s16be' | 'pcm-s24be',
+>(
+  id: Id,
+  bitDepth: BitDepth,
+  codec: Codec,
+): Readonly<{
+  readonly bitDepth: BitDepth;
+  readonly codec: Codec;
+  readonly constraints: typeof AIFF_OUTPUT_CODEC_CONSTRAINTS;
+  readonly encoding: null;
+  readonly format: 'aiff';
+  readonly integer: true;
+  readonly kind: 'lossless';
+  readonly preset: Readonly<{
+    readonly bitDepth: BitDepth;
+    readonly container: 'aiff';
+    readonly extension: 'aiff';
+    readonly id: Id;
+    readonly mimeType: 'audio/aiff';
+    readonly sampleFormat: 'integer';
+  }>;
+  readonly wasmCodec: null;
+}> {
+  const preset = AIFF_OUTPUT_PRESETS.find((candidate) => candidate.id === id);
+  if (
+    preset === undefined ||
+    preset.bitDepth !== bitDepth ||
+    preset.container !== 'aiff' ||
+    preset.extension !== 'aiff' ||
+    preset.mimeType !== 'audio/aiff' ||
+    preset.sampleFormat !== 'integer'
+  ) {
+    throw new Error(`Built-in AIFF preset "${id}" is inconsistent.`);
+  }
+
+  return Object.freeze({
+    bitDepth,
+    codec,
+    constraints: AIFF_OUTPUT_CODEC_CONSTRAINTS,
+    encoding: null,
+    format: 'aiff' as const,
+    integer: true,
+    kind: 'lossless' as const,
+    preset: preset as Readonly<{
+      readonly bitDepth: BitDepth;
+      readonly container: 'aiff';
+      readonly extension: 'aiff';
+      readonly id: Id;
+      readonly mimeType: 'audio/aiff';
+      readonly sampleFormat: 'integer';
+    }>,
+    wasmCodec: null,
+  });
+}
+
+function defineAacPreset<
+  const Id extends string,
+  const Bitrate extends number,
+>(
+  id: Id,
+  bitrate: Bitrate,
+): Readonly<{
+  readonly bitrate: Bitrate;
+  readonly codec: 'aac';
+  readonly constraints: typeof AAC_OUTPUT_CODEC_CONSTRAINTS;
+  readonly encoding: Readonly<{
+    readonly bitrate: Bitrate;
+    readonly bitrateMode: 'variable';
+    readonly codec: 'aac';
+  }>;
+  readonly format: 'aac';
+  readonly kind: 'lossy';
+  readonly preset: Readonly<{
+    readonly bitDepth: null;
+    readonly container: 'adts';
+    readonly extension: 'aac';
+    readonly id: Id;
+    readonly mimeType: 'audio/aac';
+    readonly sampleFormat: 'lossy';
+  }>;
+  readonly wasmCodec: 'aac';
+}> {
+  return Object.freeze({
+    bitrate,
+    codec: 'aac' as const,
+    constraints: AAC_OUTPUT_CODEC_CONSTRAINTS,
+    encoding: Object.freeze({
+      bitrate,
+      bitrateMode: 'variable' as const,
+      codec: 'aac' as const,
+    }),
+    format: 'aac' as const,
+    kind: 'lossy' as const,
+    preset: Object.freeze({
+      bitDepth: null,
+      container: 'adts' as const,
+      extension: 'aac' as const,
+      id,
+      mimeType: 'audio/aac' as const,
+      sampleFormat: 'lossy' as const,
+    }),
+    wasmCodec: 'aac' as const,
+  });
+}
+
+function defineOggOpusPreset<
+  const Id extends string,
+  const Bitrate extends number,
+>(
+  id: Id,
+  bitrate: Bitrate,
+): Readonly<{
+  readonly bitrate: Bitrate;
+  readonly codec: 'opus';
+  readonly constraints: typeof OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS;
+  readonly encoding: null;
+  readonly format: 'ogg';
+  readonly kind: 'lossy';
+  readonly preset: Readonly<{
+    readonly bitDepth: null;
+    readonly container: 'ogg';
+    readonly extension: 'ogg';
+    readonly id: Id;
+    readonly mimeType: 'audio/ogg';
+    readonly sampleFormat: 'lossy';
+  }>;
+  readonly wasmCodec: 'ogg-opus';
+}> {
+  return Object.freeze({
+    bitrate,
+    codec: 'opus' as const,
+    constraints: OGG_OPUS_OUTPUT_CODEC_CONSTRAINTS,
+    encoding: null,
+    format: 'ogg' as const,
+    kind: 'lossy' as const,
+    preset: Object.freeze({
+      bitDepth: null,
+      container: 'ogg' as const,
+      extension: 'ogg' as const,
+      id,
+      mimeType: 'audio/ogg' as const,
+      sampleFormat: 'lossy' as const,
+    }),
+    wasmCodec: 'ogg-opus' as const,
   });
 }
 

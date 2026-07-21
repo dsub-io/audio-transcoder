@@ -35,7 +35,7 @@ export type AudioStreamIntegerOutputPresetId =
   | Exclude<WavOutputPresetId, 'wav-float32'>
   | Extract<
       AudioStreamOutputPreset,
-      { readonly container: 'flac' }
+      { readonly container: 'aiff' | 'flac' }
     >['id'];
 
 export type AudioStreamNonIntegerOutputPresetId = Exclude<
@@ -151,7 +151,9 @@ export interface AudioStreamOutputChunk {
  * Seekable output stream. A Chromium `FileSystemWritableFileStream` satisfies
  * this contract and remains fully local to the user's device. It must be
  * unlocked when passed to `transcode()`; the operation closes it on success and
- * aborts it on cancellation or failure.
+ * aborts it on cancellation or failure until the final destination close
+ * begins. That close is the irreversible commit point: once it starts, its
+ * success or failure wins over a later cancellation request.
  */
 export type AudioStreamOutput = WritableStream<AudioStreamOutputChunk>;
 
@@ -186,8 +188,10 @@ export interface AudioStreamOperationOptions {
   readonly onProgress?: (progress: AudioStreamProgress) => void;
   /**
    * Cancels queued or running work. Rejection uses `OPERATION_ABORTED`; a
-   * transcoding operation also aborts its output stream. No wall-clock deadline
-   * is added; UI probes should compose this signal with an application deadline.
+   * transcoding operation also aborts its output stream until the final close
+   * begins. A cancellation arriving after that irreversible commit point does
+   * not override the destination close result. No wall-clock deadline is added;
+   * UI probes should compose this signal with an application deadline.
    */
   readonly signal?: AbortSignal;
 }
@@ -296,8 +300,10 @@ export interface AudioTranscoderStreamEngine {
   ): Promise<AudioStreamOutputSupportResult>;
   /**
    * Decodes, optionally resamples, and writes with bounded memory. The output
-   * stream is closed on success and aborted on cancellation or failure. The
-   * operation owns its writer lock until the returned promise settles.
+   * stream is closed on success and aborted on cancellation or failure until
+   * the final close begins. That close is an irreversible, success-wins commit
+   * point. The operation owns its writer lock until the returned promise
+   * settles.
    *
    * @throws `UNSUPPORTED_INPUT` or `UNSUPPORTED_OUTPUT` when the selected
    * source or target cannot be transcoded. Invalid configuration, cancellation,
@@ -333,6 +339,8 @@ interface AudioTranscoderStreamWorkerCommonOptions {
 export interface AudioTranscoderDefaultStreamWorkerRuntimeOptions<
   WorkerFactory = () => Worker,
 > {
+  /** Explicit runtime asset delivery and loading-state policy. */
+  readonly codecAssets: import('../assets/audio-codec-assets.js').AudioTranscoderCodecAssetsConfiguration;
   readonly capabilities?: never;
   readonly runtime?: 'default';
   /**
@@ -346,6 +354,7 @@ export interface AudioTranscoderDefaultStreamWorkerRuntimeOptions<
 export interface AudioTranscoderCustomStreamWorkerRuntimeOptions<
   WorkerFactory = () => Worker,
 > {
+  readonly codecAssets?: never;
   readonly capabilities: AudioTranscoderStreamCapabilities;
   readonly runtime: 'custom';
   /**

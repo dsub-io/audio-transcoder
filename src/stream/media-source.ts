@@ -9,6 +9,7 @@ import type {
   AudioStreamInput,
   AudioStreamInspection,
 } from './contracts.js';
+import type { AudioSourceEncoding } from '../engine/contracts.js';
 import type { PcmStreamSource } from './pcm-source.js';
 import { AudioTranscoderError } from '../errors.js';
 import { createOperationAbortedError } from '../engine/operation-errors.js';
@@ -167,7 +168,9 @@ async function probeMediaBlob(
         : null;
 
     const codecName = codec ?? 'Unknown';
-    const bitDepth = getPcmBitDepth(codecName);
+    const sourceEncoding = getMediaSourceEncoding(codecName);
+    const bitDepth =
+      sourceEncoding.kind === 'pcm' ? sourceEncoding.bitDepth : null;
     const inspection: AudioStreamInspection = Object.freeze({
       bitDepth,
       channels,
@@ -182,6 +185,7 @@ async function probeMediaBlob(
       notes: canDecode ? [] : ['A browser decoder or codec plugin is required.'],
       sampleRate,
       size: streamInput.blob.size,
+      sourceEncoding,
     });
     return { canDecode, dispose, input, inspection, track };
   } catch (error) {
@@ -418,9 +422,51 @@ function assertAudioParameters(channels: number, sampleRate: number): void {
   }
 }
 
-function getPcmBitDepth(codec: string): number | null {
-  const match = /^pcm-(?:[suf])(8|16|24|32|64)(?:be)?$/.exec(codec);
-  return match === null ? null : Number(match[1]);
+function getMediaSourceEncoding(codec: string): AudioSourceEncoding {
+  const normalizedCodec = codec.toLowerCase();
+  const pcm = /^pcm-([suf])(8|16|24|32|64)(be)?$/.exec(normalizedCodec);
+  if (pcm !== null) {
+    const sampleFormat = pcm[1] === 'f' ? 'float' : 'integer';
+    const bitDepth = Number(pcm[2]);
+    return Object.freeze({
+      bitDepth,
+      endianness:
+        bitDepth <= 8 ? 'not-applicable' : pcm[3] === 'be' ? 'big' : 'little',
+      kind: 'pcm',
+      sampleFormat,
+      signedness:
+        sampleFormat === 'float'
+          ? 'not-applicable'
+          : pcm[1] === 'u'
+            ? 'unsigned'
+            : 'signed',
+    });
+  }
+
+  if (normalizedCodec === 'flac' || normalizedCodec === 'alac') {
+    return Object.freeze({
+      bitDepth: null,
+      codec: normalizedCodec,
+      kind: 'lossless-compressed',
+    });
+  }
+  if (
+    normalizedCodec === 'aac' ||
+    normalizedCodec === 'ac3' ||
+    normalizedCodec === 'alaw' ||
+    normalizedCodec === 'eac3' ||
+    normalizedCodec === 'mp3' ||
+    normalizedCodec === 'opus' ||
+    normalizedCodec === 'ulaw' ||
+    normalizedCodec === 'vorbis'
+  ) {
+    return Object.freeze({
+      estimatedBitrateBps: null,
+      codec: normalizedCodec,
+      kind: 'lossy-compressed',
+    });
+  }
+  return Object.freeze({ kind: 'unknown' });
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

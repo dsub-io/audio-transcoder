@@ -4,6 +4,7 @@ import type { AudioStreamOutputChunk } from '../contracts.js';
 import type { AudioStreamEncoderConfiguration } from './contracts.js';
 
 const mocks = vi.hoisted(() => ({
+  aacFormats: [] as unknown[],
   addAudioTrack: vi.fn(),
   addSample: vi.fn(),
   audioSampleSources: [] as unknown[],
@@ -11,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   closeSource: vi.fn(),
   flacFormats: [] as unknown[],
   mp3Formats: [] as unknown[],
+  oggCreate: vi.fn(),
   outputCancel: vi.fn(),
   outputFinalize: vi.fn(),
   outputStart: vi.fn(),
@@ -20,6 +22,12 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('mediabunny', () => {
+  class AdtsOutputFormat {
+    constructor() {
+      mocks.aacFormats.push(this);
+    }
+  }
+
   class StreamTarget {
     private writeListener: ((event: { end: number }) => void) | undefined;
 
@@ -110,6 +118,7 @@ vi.mock('mediabunny', () => {
   }
 
   return {
+    AdtsOutputFormat,
     AudioSample,
     AudioSampleSource,
     FlacOutputFormat,
@@ -120,16 +129,21 @@ vi.mock('mediabunny', () => {
   };
 });
 
+vi.mock('./ogg-opus-stream-encoder.js', () => ({
+  createOggOpusStreamEncoder: mocks.oggCreate,
+}));
+
 import {
+  AAC_OUTPUT_PRESET_DESCRIPTORS,
+  AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS,
   FLAC_OUTPUT_PRESET_DESCRIPTORS,
   MP3_OUTPUT_PRESET_DESCRIPTORS,
+  OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS,
   STREAM_OUTPUT_PRESET_DESCRIPTORS,
   WAV_STREAM_OUTPUT_PRESET_DESCRIPTORS,
 } from '../../codecs/stream-output-presets.js';
 import {
   createMediaBunnyStreamEncoderAdapter,
-  MEDIABUNNY_STREAM_ENCODER_ADAPTER,
-  MEDIABUNNY_WAV_ENCODER_ADAPTER,
 } from './mediabunny-encoder.js';
 
 interface MockAudioSample {
@@ -161,8 +175,13 @@ interface MockOutput {
 }
 
 const DEFAULT_PRESET = WAV_STREAM_OUTPUT_PRESET_DESCRIPTORS[0].preset;
+const MEDIABUNNY_OUTPUT_PRESET_DESCRIPTORS =
+  STREAM_OUTPUT_PRESET_DESCRIPTORS.filter(
+    ({ format }) => format !== 'aiff' && format !== 'ogg',
+  );
 
 beforeEach(() => {
+  mocks.aacFormats.length = 0;
   mocks.addAudioTrack.mockReset();
   mocks.addSample.mockReset().mockResolvedValue(undefined);
   mocks.closeSource.mockReset();
@@ -173,31 +192,37 @@ beforeEach(() => {
   mocks.audioSamples.length = 0;
   mocks.flacFormats.length = 0;
   mocks.mp3Formats.length = 0;
+  mocks.oggCreate.mockReset();
   mocks.outputs.length = 0;
   mocks.streamTargets.length = 0;
   mocks.wavFormats.length = 0;
 });
 
 describe('MediaBunny stream encoder adapter', () => {
-  it('keeps the compatibility alias on the frozen production adapter', () => {
-    expect(MEDIABUNNY_STREAM_ENCODER_ADAPTER.id).toBe('mediabunny');
-    expect(Object.isFrozen(MEDIABUNNY_STREAM_ENCODER_ADAPTER)).toBe(true);
-    expect(MEDIABUNNY_WAV_ENCODER_ADAPTER).toBe(
-      MEDIABUNNY_STREAM_ENCODER_ADAPTER,
-    );
+  it('creates a frozen adapter without initializing a codec', () => {
+    const adapter = createMediaBunnyStreamEncoderAdapter(vi.fn());
+    expect(adapter.id).toBe('mediabunny');
+    expect(Object.isFrozen(adapter)).toBe(true);
   });
 
-  it.each(STREAM_OUTPUT_PRESET_DESCRIPTORS)(
+  it.each(MEDIABUNNY_OUTPUT_PRESET_DESCRIPTORS)(
     'maps $preset.id to its exact MediaBunny format and source configuration',
     async (descriptor) => {
       const ensureCodec = vi.fn().mockResolvedValue(undefined);
-      const adapter = createMediaBunnyStreamEncoderAdapter(ensureCodec);
+      const bindCodecConfiguration = vi.fn();
+      const operationSignal = new AbortController().signal;
+      const adapter = createMediaBunnyStreamEncoderAdapter(
+        ensureCodec,
+        mocks.oggCreate,
+        bindCodecConfiguration,
+      );
       const writable = createWritable();
       const encoder = await adapter.create(
         createConfiguration({
           outputChunkBytes: 128 * 1024,
           preset: descriptor.preset,
           rf64: descriptor.format === 'wav' ? true : null,
+          signal: operationSignal,
           writable,
         }),
       );
@@ -209,18 +234,38 @@ describe('MediaBunny stream encoder adapter', () => {
         options: { chunked: true, chunkSize: 128 * 1024 },
       });
       expect(target.writable).toBe(writable);
-      expect(source.options).toBe(descriptor.encoding);
+      expect(source.options).toMatchObject(descriptor.encoding!);
       expect(output.options.target).toBe(target);
       expect(output.audioSource).toBe(source);
 
       if (descriptor.wasmCodec === null) {
         expect(ensureCodec).not.toHaveBeenCalled();
+        expect(source.options).toBe(descriptor.encoding);
+        expect(bindCodecConfiguration).not.toHaveBeenCalled();
       } else {
         expect(ensureCodec).toHaveBeenCalledOnce();
         expect(ensureCodec).toHaveBeenCalledWith(descriptor.wasmCodec);
+        expect(source.options).not.toBe(descriptor.encoding);
+        const config = {
+          codec: descriptor.encoding!.codec,
+          numberOfChannels: 2,
+          sampleRate: 48_000,
+        } as AudioEncoderConfig;
+        const onEncoderConfig = source.options.onEncoderConfig as
+          | ((encoderConfig: AudioEncoderConfig) => void)
+          | undefined;
+        expect(onEncoderConfig).toEqual(expect.any(Function));
+        onEncoderConfig?.(config);
+        expect(bindCodecConfiguration).toHaveBeenCalledWith(
+          descriptor.wasmCodec,
+          config,
+          operationSignal,
+        );
       }
 
-      if (descriptor.format === 'wav') {
+      if (descriptor.format === 'aac') {
+        expect(mocks.aacFormats).toHaveLength(1);
+      } else if (descriptor.format === 'wav') {
         expect(current<MockOutputFormat>(mocks.wavFormats).options).toEqual({
           large: true,
         });
@@ -236,6 +281,152 @@ describe('MediaBunny stream encoder adapter', () => {
 
       await expect(encoder.start()).resolves.toBeUndefined();
       expect(mocks.outputStart).toHaveBeenCalledWith(output);
+    },
+  );
+
+  it('keeps simultaneous adapter bindings isolated by runtime', async () => {
+    const firstBind = vi.fn();
+    const secondBind = vi.fn();
+    const preset = MP3_OUTPUT_PRESET_DESCRIPTORS[0]!.preset;
+    const firstSignal = new AbortController().signal;
+    const secondSignal = new AbortController().signal;
+    const first = createMediaBunnyStreamEncoderAdapter(
+      vi.fn().mockResolvedValue(undefined),
+      mocks.oggCreate,
+      firstBind,
+    );
+    const second = createMediaBunnyStreamEncoderAdapter(
+      vi.fn().mockResolvedValue(undefined),
+      mocks.oggCreate,
+      secondBind,
+    );
+
+    await first.create(createConfiguration({ preset, signal: firstSignal }));
+    await second.create(createConfiguration({ preset, signal: secondSignal }));
+    const firstSource = mocks.audioSampleSources[0] as MockAudioSampleSource;
+    const secondSource = mocks.audioSampleSources[1] as MockAudioSampleSource;
+    const firstConfig = { codec: 'mp3' } as AudioEncoderConfig;
+    const secondConfig = { codec: 'mp3' } as AudioEncoderConfig;
+    const firstOnConfig = firstSource.options.onEncoderConfig as (
+      config: AudioEncoderConfig,
+    ) => void;
+    const secondOnConfig = secondSource.options.onEncoderConfig as (
+      config: AudioEncoderConfig,
+    ) => void;
+
+    firstOnConfig(firstConfig);
+    secondOnConfig(secondConfig);
+
+    expect(firstBind).toHaveBeenCalledWith('mp3', firstConfig, firstSignal);
+    expect(firstBind.mock.calls[0]![1]).toBe(firstConfig);
+    expect(secondBind).toHaveBeenCalledWith('mp3', secondConfig, secondSignal);
+    expect(secondBind.mock.calls[0]![1]).toBe(secondConfig);
+  });
+
+  it('fails closed when a bundled codec has no runtime binding', async () => {
+    const adapter = createMediaBunnyStreamEncoderAdapter(
+      vi.fn().mockResolvedValue(undefined),
+    );
+    await adapter.create(
+      createConfiguration({ preset: MP3_OUTPUT_PRESET_DESCRIPTORS[0]!.preset }),
+    );
+    const source = current<MockAudioSampleSource>(mocks.audioSampleSources);
+    const onEncoderConfig = source.options.onEncoderConfig as (
+      config: AudioEncoderConfig,
+    ) => void;
+
+    expect(() =>
+      onEncoderConfig({ codec: 'mp3' } as AudioEncoderConfig),
+    ).toThrow(
+      expect.objectContaining({
+        code: 'INVALID_CONFIGURATION',
+        message: expect.stringContaining('explicit runtime configuration'),
+      }),
+    );
+  });
+
+  it.each(OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS)(
+    'routes $preset.id to the bundled Ogg Opus writer without MediaBunny allocation',
+    async (descriptor) => {
+      const oggEncoder = { id: descriptor.preset.id };
+      mocks.oggCreate.mockResolvedValueOnce(oggEncoder);
+      const ensureCodec = vi.fn().mockResolvedValue(undefined);
+      const adapter = createMediaBunnyStreamEncoderAdapter(
+        ensureCodec,
+        mocks.oggCreate,
+      );
+      const configuration = createConfiguration({
+        preset: descriptor.preset,
+        rf64: null,
+      });
+
+      await expect(adapter.create(configuration)).resolves.toBe(oggEncoder);
+
+      expect(mocks.oggCreate).toHaveBeenCalledOnce();
+      expect(mocks.oggCreate).toHaveBeenCalledWith(
+        configuration,
+        descriptor.bitrate,
+      );
+      expect(ensureCodec).not.toHaveBeenCalled();
+      expect(mocks.streamTargets).toHaveLength(0);
+      expect(mocks.outputs).toHaveLength(0);
+    },
+  );
+
+  it('uses an injected Ogg Opus factory for an external raw-WASM runtime', async () => {
+    const oggEncoder = { id: 'external-ogg' };
+    const createOgg = vi.fn().mockResolvedValue(oggEncoder);
+    const adapter = createMediaBunnyStreamEncoderAdapter(vi.fn(), createOgg);
+    const descriptor = OGG_OPUS_OUTPUT_PRESET_DESCRIPTORS[0]!;
+    const configuration = createConfiguration({
+      preset: descriptor.preset,
+      rf64: null,
+    });
+
+    await expect(adapter.create(configuration)).resolves.toBe(oggEncoder);
+    expect(createOgg).toHaveBeenCalledWith(
+      configuration,
+      descriptor.bitrate,
+    );
+    expect(mocks.oggCreate).not.toHaveBeenCalled();
+  });
+
+  it.each(AIFF_STREAM_OUTPUT_PRESET_DESCRIPTORS)(
+    'routes $preset.id to the built-in seekable writer without MediaBunny allocation',
+    async (descriptor) => {
+      const ensureCodec = vi.fn().mockResolvedValue(undefined);
+      const adapter = createMediaBunnyStreamEncoderAdapter(ensureCodec);
+      const writes: AudioStreamOutputChunk[] = [];
+      const writable = new WritableStream<AudioStreamOutputChunk>({
+        write(chunk) {
+          writes.push({
+            data: Uint8Array.from(chunk.data),
+            position: chunk.position,
+            type: 'write',
+          });
+        },
+      });
+      const encoder = await adapter.create(
+        createConfiguration({
+          channels: 1,
+          preset: descriptor.preset,
+          rf64: null,
+          writable,
+        }),
+      );
+
+      await encoder.start();
+      await encoder.write(new Float32Array([0.25]), 0);
+      await encoder.finalize();
+
+      expect(ensureCodec).not.toHaveBeenCalled();
+      expect(mocks.streamTargets).toHaveLength(0);
+      expect(mocks.outputs).toHaveLength(0);
+      expect(writes[0]).toMatchObject({ position: 0 });
+      expect(writes.at(-1)).toMatchObject({ position: 0 });
+      expect(encoder.getBytesWritten()).toBe(
+        54 + descriptor.bitDepth / 8 + (descriptor.bitDepth === 24 ? 1 : 0),
+      );
     },
   );
 
@@ -305,6 +496,7 @@ describe('MediaBunny stream encoder adapter', () => {
   });
 
   it.each([
+    ['AAC', AAC_OUTPUT_PRESET_DESCRIPTORS[0].preset],
     ['MP3', MP3_OUTPUT_PRESET_DESCRIPTORS[0].preset],
     ['FLAC', FLAC_OUTPUT_PRESET_DESCRIPTORS[0].preset],
   ])(
@@ -356,6 +548,37 @@ describe('MediaBunny stream encoder adapter', () => {
     ).resolves.toBeDefined();
     expect(ensureCodec).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    ['AAC', AAC_OUTPUT_PRESET_DESCRIPTORS[0].preset],
+    ['MP3', MP3_OUTPUT_PRESET_DESCRIPTORS[0].preset],
+    ['FLAC', FLAC_OUTPUT_PRESET_DESCRIPTORS[0].preset],
+  ])(
+    'aborts a never-settling %s MediaBunny startup promptly',
+    async (_format, preset) => {
+      const startup = deferred<void>();
+      mocks.outputStart.mockReturnValueOnce(startup.promise);
+      const controller = new AbortController();
+      const adapter = createMediaBunnyStreamEncoderAdapter(
+        vi.fn().mockResolvedValue(undefined),
+        mocks.oggCreate,
+        vi.fn(),
+      );
+      const encoder = await adapter.create(
+        createConfiguration({ preset, signal: controller.signal }),
+      );
+
+      const pending = encoder.start();
+      await vi.waitFor(() => expect(mocks.outputStart).toHaveBeenCalledOnce());
+      controller.abort(`${_format} startup stopped`);
+
+      await expect(pending).rejects.toMatchObject({
+        code: 'OPERATION_ABORTED',
+        message: `${_format} startup stopped`,
+      });
+      startup.reject(new Error(`late ${_format} startup failure`));
+    },
+  );
 
   it('awaits write backpressure and always closes the input sample', async () => {
     let release: (() => void) | undefined;
@@ -565,4 +788,18 @@ function current<T>(items: readonly unknown[]): T {
     throw new Error('Expected a current MediaBunny mock instance.');
   }
   return item as T;
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  reject(error: unknown): void;
+  resolve(value: T): void;
+} {
+  let reject!: (error: unknown) => void;
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, reject, resolve };
 }

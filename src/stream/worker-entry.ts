@@ -1,10 +1,6 @@
-import { createAudioTranscoderStreamEngine } from './engine.js';
-import {
-  exposeAudioTranscoderStreamWorker,
-  type AudioTranscoderStreamWorkerScope,
-} from './expose-worker.js';
+import { exposeDefaultAudioTranscoderStreamWorker } from './default-worker-host.js';
+import type { AudioTranscoderStreamWorkerScope } from './expose-worker.js';
 
-exposeAudioTranscoderStreamWorker(
-  createAudioTranscoderStreamEngine(),
+exposeDefaultAudioTranscoderStreamWorker(
   globalThis as unknown as AudioTranscoderStreamWorkerScope,
 );

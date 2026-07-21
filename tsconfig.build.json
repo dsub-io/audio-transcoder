@@ -8,5 +8,10 @@
     "outDir": "dist",
     "sourceMap": true
   },
-  "exclude": ["src/**/*.test.ts", "dist", "node_modules"]
+  "exclude": [
+    "src/**/*.test-support.ts",
+    "src/**/*.test.ts",
+    "dist",
+    "node_modules"
+  ]
 }

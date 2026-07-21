@@ -1,4 +1,5 @@
 import {
+  AdtsOutputFormat,
   AudioSample,
   AudioSampleSource,
   FlacOutputFormat,
@@ -6,6 +7,7 @@ import {
   Output,
   StreamTarget,
   WavOutputFormat,
+  type AudioEncodingConfig,
 } from 'mediabunny';
 import {
   findStreamOutputPresetDescriptor,
@@ -14,6 +16,7 @@ import {
 } from '../../codecs/stream-output-presets.js';
 import { AudioTranscoderError } from '../../errors.js';
 import { createOperationAbortedError } from '../../engine/operation-errors.js';
+import { raceWithOperationAbort } from '../abortable-operation.js';
 import type {
   AudioStreamEncoder,
   AudioStreamEncoderAdapter,
@@ -21,13 +24,30 @@ import type {
 } from './contracts.js';
 import { DEFAULT_AUDIO_STREAM_CODEC_RUNTIME_IDS } from './ids.js';
 import {
-  ensureMediaBunnyCodecRegistered,
   type EnsureMediaBunnyCodecRegistered,
+  type MediaBunnyBundledWasmOutputCodec,
 } from './lazy-codec-registration.js';
+import { createAiffStreamEncoder } from './aiff-stream-encoder.js';
+import type { OggOpusStreamEncoderFactory } from './ogg-opus-stream-encoder.js';
+
+type MediaBunnyOutputPresetDescriptor = StreamOutputPresetDescriptor & {
+  readonly encoding: Readonly<AudioEncodingConfig>;
+  readonly format: 'aac' | 'flac' | 'mp3' | 'wav';
+  readonly wasmCodec: MediaBunnyBundledWasmOutputCodec | null;
+};
+
+export type BindMediaBunnyCodecConfiguration = (
+  codec: MediaBunnyBundledWasmOutputCodec,
+  config: AudioEncoderConfig,
+  signal?: AbortSignal,
+) => void;
 
 export function createMediaBunnyStreamEncoderAdapter(
-  ensureCodecRegistered: EnsureMediaBunnyCodecRegistered =
-    ensureMediaBunnyCodecRegistered,
+  ensureCodecRegistered: EnsureMediaBunnyCodecRegistered,
+  createOggOpusEncoder: OggOpusStreamEncoderFactory =
+    missingOggOpusEncoder,
+  bindCodecConfiguration: BindMediaBunnyCodecConfiguration =
+    missingCodecConfigurationBinding,
 ): AudioStreamEncoderAdapter {
   return Object.freeze({
     id: DEFAULT_AUDIO_STREAM_CODEC_RUNTIME_IDS.encoderAdapter,
@@ -49,14 +69,39 @@ export function createMediaBunnyStreamEncoderAdapter(
         );
       }
       const wasmCodec = descriptor.wasmCodec;
-      if (wasmCodec !== null) {
+      if (wasmCodec !== null && wasmCodec !== 'ogg-opus') {
         const registration = Promise.resolve().then(() =>
           ensureCodecRegistered(wasmCodec),
         );
         await waitForCodecRegistration(registration, configuration.signal);
       }
       throwIfAborted(configuration.signal);
-      const encoder = await createMediaBunnyEncoder(configuration, descriptor);
+      if (descriptor.format === 'aiff') {
+        if (
+          descriptor.kind !== 'lossless' ||
+          (descriptor.bitDepth !== 16 && descriptor.bitDepth !== 24)
+        ) {
+          throw new AudioTranscoderError(
+            'UNSUPPORTED_OUTPUT',
+            `Preset "${descriptor.preset.id}" is not supported by the AIFF stream writer.`,
+          );
+        }
+        return createAiffStreamEncoder(configuration, descriptor.bitDepth);
+      }
+      if (descriptor.format === 'ogg') {
+        if (descriptor.kind !== 'lossy') {
+          throw new AudioTranscoderError(
+            'UNSUPPORTED_OUTPUT',
+            `Preset "${descriptor.preset.id}" is not supported by the Ogg Opus stream writer.`,
+          );
+        }
+        return createOggOpusEncoder(configuration, descriptor.bitrate);
+      }
+      const encoder = await createMediaBunnyEncoder(
+        configuration,
+        descriptor,
+        bindCodecConfiguration,
+      );
       if (configuration.signal?.aborted) {
         const error = createOperationAbortedError(configuration.signal);
         await encoder.cancel(error);
@@ -67,17 +112,34 @@ export function createMediaBunnyStreamEncoderAdapter(
   });
 }
 
-export const MEDIABUNNY_STREAM_ENCODER_ADAPTER =
-  createMediaBunnyStreamEncoderAdapter();
+async function missingOggOpusEncoder(): Promise<AudioStreamEncoder> {
+  throw new AudioTranscoderError(
+    'INVALID_CONFIGURATION',
+    'The Ogg Opus encoder requires an explicit raw-WASM factory.',
+  );
+}
 
-/** @deprecated Internal compatibility alias. */
-export const MEDIABUNNY_WAV_ENCODER_ADAPTER =
-  MEDIABUNNY_STREAM_ENCODER_ADAPTER;
+function missingCodecConfigurationBinding(
+  codec: MediaBunnyBundledWasmOutputCodec,
+): never {
+  throw new AudioTranscoderError(
+    'INVALID_CONFIGURATION',
+    `The ${codec.toUpperCase()} encoder requires an explicit runtime configuration binding.`,
+  );
+}
 
 async function createMediaBunnyEncoder(
   configuration: AudioStreamEncoderConfiguration,
   descriptor: StreamOutputPresetDescriptor,
+  bindCodecConfiguration: BindMediaBunnyCodecConfiguration,
 ): Promise<AudioStreamEncoder> {
+  if (descriptor.encoding === null) {
+    throw new AudioTranscoderError(
+      'UNSUPPORTED_OUTPUT',
+      `Preset "${descriptor.preset.id}" requires a built-in stream writer.`,
+    );
+  }
+  const mediaBunnyDescriptor = descriptor as MediaBunnyOutputPresetDescriptor;
   const streamTarget = new StreamTarget(configuration.writable, {
     chunked: true,
     chunkSize: configuration.outputChunkBytes,
@@ -88,12 +150,18 @@ async function createMediaBunnyEncoder(
   });
 
   const output = new Output({
-    format: createOutputFormat(descriptor, configuration.rf64),
+    format: createOutputFormat(mediaBunnyDescriptor, configuration.rf64),
     target: streamTarget,
   });
 
   try {
-    const source = new AudioSampleSource(descriptor.encoding);
+    const source = new AudioSampleSource(
+      createMediaBunnyEncodingConfiguration(
+        mediaBunnyDescriptor,
+        bindCodecConfiguration,
+        configuration.signal,
+      ),
+    );
     let sourceClosed = false;
     const closeSource = (): void => {
       if (!sourceClosed) {
@@ -106,7 +174,10 @@ async function createMediaBunnyEncoder(
     const cancel = async (): Promise<void> => {
       closeSource();
       if (output.state !== 'canceled' && output.state !== 'finalized') {
-        await output.cancel().catch(() => undefined);
+        await raceWithOperationAbort(
+          output.cancel(),
+          configuration.signal,
+        ).catch(() => undefined);
       }
     };
 
@@ -116,7 +187,10 @@ async function createMediaBunnyEncoder(
         try {
           throwIfAborted(configuration.signal);
           closeSource();
-          await output.finalize();
+          await raceWithOperationAbort(
+            output.finalize(),
+            configuration.signal,
+          );
           throwIfAborted(configuration.signal);
         } catch (error) {
           await cancel();
@@ -126,7 +200,7 @@ async function createMediaBunnyEncoder(
       getBytesWritten: () => bytesWritten,
       async start(): Promise<void> {
         throwIfAborted(configuration.signal);
-        await output.start();
+        await raceWithOperationAbort(output.start(), configuration.signal);
         throwIfAborted(configuration.signal);
       },
       async write(samples, frameOffset): Promise<void> {
@@ -139,7 +213,10 @@ async function createMediaBunnyEncoder(
           timestamp: frameOffset / configuration.sampleRate,
         });
         try {
-          await source.add(sample);
+          await raceWithOperationAbort(
+            source.add(sample),
+            configuration.signal,
+          );
           throwIfAborted(configuration.signal);
         } finally {
           sample.close();
@@ -147,9 +224,31 @@ async function createMediaBunnyEncoder(
       },
     };
   } catch (error) {
-    await output.cancel().catch(() => undefined);
+    await raceWithOperationAbort(
+      output.cancel(),
+      configuration.signal,
+    ).catch(() => undefined);
     throw error;
   }
+}
+
+function createMediaBunnyEncodingConfiguration(
+  descriptor: MediaBunnyOutputPresetDescriptor,
+  bindCodecConfiguration: BindMediaBunnyCodecConfiguration,
+  signal: AbortSignal | undefined,
+): Readonly<AudioEncodingConfig> {
+  const codec = descriptor.wasmCodec;
+  if (codec === null) {
+    return descriptor.encoding;
+  }
+  const onEncoderConfig = descriptor.encoding.onEncoderConfig;
+  return {
+    ...descriptor.encoding,
+    onEncoderConfig(config): void {
+      onEncoderConfig?.(config);
+      bindCodecConfiguration(codec, config, signal);
+    },
+  };
 }
 
 async function waitForCodecRegistration(
@@ -181,10 +280,12 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 function createOutputFormat(
-  descriptor: StreamOutputPresetDescriptor,
+  descriptor: MediaBunnyOutputPresetDescriptor,
   rf64: boolean | null,
-): FlacOutputFormat | Mp3OutputFormat | WavOutputFormat {
+): AdtsOutputFormat | FlacOutputFormat | Mp3OutputFormat | WavOutputFormat {
   switch (descriptor.format) {
+    case 'aac':
+      return new AdtsOutputFormat();
     case 'flac':
       return new FlacOutputFormat({ appendOnly: false });
     case 'mp3':

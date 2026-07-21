@@ -35,6 +35,14 @@ describe('built-in WAV and AIFF codecs', () => {
       expect(inspection.channels).toBe(2);
       expect(inspection.sampleRate).toBe(48_000);
       expect(inspection.decodeSupport).toBe('built-in');
+      expect(inspection.sourceEncoding).toEqual({
+        bitDepth: preset.bitDepth,
+        endianness: preset.container === 'wav' ? 'little' : 'big',
+        kind: 'pcm',
+        sampleFormat: preset.sampleFormat,
+        signedness:
+          preset.sampleFormat === 'float' ? 'not-applicable' : 'signed',
+      });
       expect(decoded.sampleRate).toBe(48_000);
       expect(decoded.channelData).toHaveLength(2);
       expect(decoded.channelData[0]).toHaveLength(5);
@@ -175,15 +183,32 @@ describe('WAV malformed and extended inputs', () => {
     expect(wavInspector.inspect({ data: unknown })).toMatchObject({
       codec: 'WAVE format 2',
       decodeSupport: 'browser-dependent',
+      sourceEncoding: { kind: 'unknown' },
     });
     await expect(wavDecoder.decode({ data: unknown })).rejects.toThrowError(
       expect.objectContaining({ code: 'UNSUPPORTED_INPUT' }),
     );
     expect(wavInspector.inspect({ data: extensible })?.codec).toBe('PCM integer');
+    expect(wavInspector.inspect({ data: extensible })?.sourceEncoding).toEqual({
+      bitDepth: 16,
+      endianness: 'little',
+      kind: 'pcm',
+      sampleFormat: 'integer',
+      signedness: 'signed',
+    });
     await expect(wavDecoder.decode({ data: extensible })).resolves.not.toBeNull();
     expect(wavInspector.inspect({ data: extensibleFloat })?.codec).toBe(
       'PCM float',
     );
+    expect(
+      wavInspector.inspect({ data: extensibleFloat })?.sourceEncoding,
+    ).toEqual({
+      bitDepth: 32,
+      endianness: 'little',
+      kind: 'pcm',
+      sampleFormat: 'float',
+      signedness: 'not-applicable',
+    });
     await expect(wavDecoder.decode({ data: extensibleFloat })).resolves.not.toBeNull();
     expect(wavInspector.inspect({ data: extensibleUnsupported })).toMatchObject({
       codec: 'WAVE format 65534',
@@ -259,6 +284,13 @@ describe('WAV malformed and extended inputs', () => {
 
     const decoded = await wavDecoder.decode({ data: eightBit });
 
+    expect(wavInspector.inspect({ data: eightBit })?.sourceEncoding).toEqual({
+      bitDepth: 8,
+      endianness: 'not-applicable',
+      kind: 'pcm',
+      sampleFormat: 'integer',
+      signedness: 'unsigned',
+    });
     expect([...(decoded?.channelData[0] ?? [])]).toEqual([
       -1,
       0,
@@ -353,11 +385,135 @@ describe('AIFF malformed and compressed inputs', () => {
       codec: 'Compression ulaw',
       container: 'AIFC',
       decodeSupport: 'browser-dependent',
+      sourceEncoding: {
+        estimatedBitrateBps: null,
+        codec: 'ulaw',
+        kind: 'lossy-compressed',
+      },
     });
     await expect(aiffDecoder.decode({ data })).rejects.toThrowError(
       expect.objectContaining({ code: 'UNSUPPORTED_INPUT' }),
     );
   });
+
+  it.each([
+    [
+      'twos',
+      16,
+      {
+        bitDepth: 16,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
+    ],
+    [
+      'sowt',
+      16,
+      {
+        bitDepth: 16,
+        endianness: 'little',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
+    ],
+    [
+      'raw ',
+      8,
+      {
+        bitDepth: 8,
+        endianness: 'not-applicable',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'unsigned',
+      },
+    ],
+    [
+      'fl32',
+      32,
+      {
+        bitDepth: 32,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'FL32',
+      8,
+      {
+        bitDepth: 8,
+        endianness: 'not-applicable',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'fl64',
+      64,
+      {
+        bitDepth: 64,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'FL64',
+      32,
+      {
+        bitDepth: 32,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'ALAC',
+      16,
+      { bitDepth: null, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    [
+      'alac',
+      24,
+      { bitDepth: null, codec: 'alac', kind: 'lossless-compressed' },
+    ],
+    [
+      'alaw',
+      16,
+      {
+        codec: 'alaw',
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      },
+    ],
+    [
+      'ima4',
+      16,
+      {
+        codec: 'ima4',
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      },
+    ],
+    ['zzzz', 16, { kind: 'unknown' }],
+  ] as const)(
+    'classifies AIFC compression %s without overclaiming decode support',
+    (compression, bitDepth, sourceEncoding) => {
+      const data = createAiff({ bitDepth, compression, formType: 'AIFC' });
+
+      expect(aiffInspector.inspect({ data })).toMatchObject({
+        decodeSupport: 'browser-dependent',
+        sourceEncoding,
+      });
+    },
+  );
 
   it('rejects AIFC without a compression type', async () => {
     const data = createAiff({ commonChunkSize: 18, formType: 'AIFC' });

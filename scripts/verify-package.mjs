@@ -1,8 +1,23 @@
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
+
+const sha256 = (value) => createHash('sha256').update(value).digest('hex');
+const containsLargeBase64Literal = (source) =>
+  /['"`][A-Za-z0-9+/]{1024,}={0,2}['"`]/u.test(source);
+const execFileAsync = promisify(execFile);
+const repositoryRootUrl = new URL('../', import.meta.url);
+const repositoryRootPath = fileURLToPath(repositoryRootUrl);
+const verificationStartedAt = performance.now();
 
 const packageJsonUrl = new URL('../package.json', import.meta.url);
 const packageJson = JSON.parse(await readFile(packageJsonUrl, 'utf8'));
+const releaseWorkflow = await readFile(
+  new URL('../.github/workflows/release.yml', import.meta.url),
+  'utf8',
+);
 const licenseText = await readFile(
   new URL('../LICENSE.md', import.meta.url),
   'utf8',
@@ -11,16 +26,74 @@ const thirdPartyText = await readFile(
   new URL('../THIRD_PARTY_NOTICES.md', import.meta.url),
   'utf8',
 );
-const thirdPartyLicenses = {
-  'LAME-3.100-LGPL-2.0-or-later.txt':
-    'bfe4a52dc4645385f356a8e83cc54216a293e3b6f1cb4f79f5fc0277abf937fd',
-  'LIBFLAC-XIPH-BSD.txt':
-    '7866ee98760fc1f0156b4fe6bf530257e02be487ab3fd94e2b63799dd32d6b2c',
-  'LIBSAMPLERATE-JS-MIT-AND-LIBSAMPLERATE-BSD-2-CLAUSE.txt':
-    '69f1609423518937e0c70baade7a15e4eaaaee7109a8b0e793733b0f89ec6f72',
-  'MEDIABUNNY-MPL-2.0.txt':
-    '3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04',
-};
+const aacBuildManifest = JSON.parse(
+  await readFile(
+    new URL('../codec-build/aac/manifest.json', import.meta.url),
+    'utf8',
+  ),
+);
+const flacBuildManifest = JSON.parse(
+  await readFile(
+    new URL('../codec-build/flac/manifest.json', import.meta.url),
+    'utf8',
+  ),
+);
+const mp3BuildManifest = JSON.parse(
+  await readFile(
+    new URL('../codec-build/mp3/manifest.json', import.meta.url),
+    'utf8',
+  ),
+);
+const codecAssetManifest = JSON.parse(
+  await readFile(
+    new URL('../codec-assets/manifest.json', import.meta.url),
+    'utf8',
+  ),
+);
+const aacBuildReadme = await readFile(
+  new URL('../codec-build/aac/README.md', import.meta.url),
+  'utf8',
+);
+const aacBuildScript = await readFile(
+  new URL('../codec-build/aac/build.sh', import.meta.url),
+  'utf8',
+);
+const aacBridgeSource = await readFile(
+  new URL('../codec-build/aac/bridge.c', import.meta.url),
+  'utf8',
+);
+const aacSourceArtifact = await readFile(
+  new URL('../src/stream/runtime/aac.generated.mjs', import.meta.url),
+);
+const aacBuiltArtifact = await readFile(
+  new URL('../dist/stream/runtime/aac.generated.mjs', import.meta.url),
+);
+const aacSourceGlue = aacSourceArtifact.toString('utf8');
+const aacBuiltGlue = aacBuiltArtifact.toString('utf8');
+const oggOpusBuildScript = await readFile(
+  new URL('../scripts/ogg-opus-build-wasm.sh', import.meta.url),
+  'utf8',
+);
+const oggOpusProvenance = await readFile(
+  new URL('../vendor/ogg-opus/ogg-opus-PROVENANCE.md', import.meta.url),
+  'utf8',
+);
+const resamplerProvenance = await readFile(
+  new URL('../vendor/resampler/libsamplerate-PROVENANCE.md', import.meta.url),
+  'utf8',
+);
+const resamplerBuildScript = await readFile(
+  new URL('../scripts/resampler-build-wasm.sh', import.meta.url),
+  'utf8',
+);
+const thirdPartyLicenseFiles = [
+  'EMSCRIPTEN-MIT-AND-UIUC-NCSA.txt',
+  'LAME-3.100-LGPL-2.0-or-later.txt',
+  'LIBFLAC-XIPH-BSD.txt',
+  'LIBOPUSENC-LIBOPUS-LIBOGG-XIPH-BSD.txt',
+  'LIBSAMPLERATE-BSD-2-CLAUSE.txt',
+  'MEDIABUNNY-MPL-2.0.txt',
+];
 const publicApi = await import('../dist/index.js');
 
 if (
@@ -42,14 +115,46 @@ const requiredNoticeText = [
   'LGPL-2.0-or-later',
   'ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e',
   'lame-3.100.tar.gz',
-  '--disable-decoder',
   'mpglib/libmpgdecoder.la',
   '3f1ecff843dd1b8c07fbb5f59425a4ec71fe4f6c',
   'COPYING.Xiph',
-  'bcb176448cf9700e9820b87afd29a78ab860cdf8',
+  'FFmpeg 8.1.2',
+  'LGPL-2.1-or-later',
+  '38b88335f99e76ed89ff3c93f877fdefce736c13',
+  '464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c',
+  aacBuildManifest.artifact.sha256,
+  aacBuildManifest.wasmArtifact.sha256,
+  'codec-build/aac/',
+  'codec-build/aac/LICENSE.FFMPEG-LGPL-2.1.txt',
+  'codec-build/aac/LICENSE.BRIDGE-MPL-2.0.txt',
+  'Emscripten compiler toolchains',
+  'Emscripten `5.0.7`',
+  '263db4cffa6f9fc2ec514a70abac81362ea41849',
+  'emscripten/emsdk@sha256:19b3a361d84262c1cd133a29fb84368678bab32aee47e074fcd83a216566330c',
+  'Emscripten `4.0.20`',
+  'e4fe26ef59168ff44f4c23c466e497bf60b3411e',
+  '6913738ec5371a88c4af5a80db0ab42bad3de681',
+  'c387d7a7e9537d0041d2c3ae71b7538cc978104e',
+  'emscripten/emsdk@sha256:19b3a361d84262c1cd133a29fb84368678bab32aee47e074fcd83a216566330c',
+  'THIRD_PARTY_LICENSES/EMSCRIPTEN-MIT-AND-UIUC-NCSA.txt',
+  'libopusenc 0.3',
+  'f616d3aff9b2034547894ccb8ab56c36cf1a4acb0d922c5d7119f97bbe58642c',
+  'libopus 1.6.1',
+  '6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1',
+  'libogg 1.3.6',
+  '5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061',
+  'vendor/ogg-opus/ogg-opus-PROVENANCE.md',
   'aee38d0bc797d0d1a3774ef574af1d5d248d2398',
-  'scripts/build_emscripten.sh',
-  'WASM=0',
+  'deefc369f627b256724c4785bf32de5a839d8672f573aa17b1c89d6974dee3b3',
+  'vendor/resampler/libsamplerate-PROVENANCE.md',
+  flacBuildManifest.artifact.sha256,
+  flacBuildManifest.libflac.archiveSha256,
+  'codec-build/flac/',
+  mp3BuildManifest.artifact.sha256,
+  'codec-build/mp3/',
+  'dadecff97059b0e7847990ee180517cccdbe6db3e24d4018c33904620a49730d',
+  '2134656307e866675cbd502030627fa495d80ee77590ca50f29c40ce92c2d226',
+  'bab40503bf0ed441421a5634b2e2c98aaad5e6b0bf663461fc5b19e779985e27',
   'https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a/packages/mp3-encoder',
   'https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a/packages/flac-encoder',
   'https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz',
@@ -59,38 +164,304 @@ const requiredNoticeText = [
   'https://github.com/xiph/flac/blob/3f1ecff843dd1b8c07fbb5f59425a4ec71fe4f6c/COPYING.Xiph',
   'https://github.com/Vanilagy/mediabunny/blob/794b84884f1e23cb6241689b3563190d138bbd9a/packages/flac-encoder/README.md#building-and-development',
   'https://github.com/Vanilagy/mediabunny/blob/794b84884f1e23cb6241689b3563190d138bbd9a/packages/flac-encoder/src/bridge.c',
-  'https://github.com/aolsenjazz/libsamplerate-js/tree/bcb176448cf9700e9820b87afd29a78ab860cdf8',
-  'https://github.com/aolsenjazz/libsamplerate-js/blob/bcb176448cf9700e9820b87afd29a78ab860cdf8/scripts/build_emscripten.sh',
+  'https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz',
+  'https://github.com/emscripten-core/emscripten',
+  'https://github.com/emscripten-core/emsdk',
+  'https://downloads.xiph.org/releases/opus/libopusenc-0.3.tar.gz',
+  'https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz',
+  'https://downloads.xiph.org/releases/ogg/libogg-1.3.6.tar.xz',
   'https://github.com/libsndfile/libsamplerate/tree/aee38d0bc797d0d1a3774ef574af1d5d248d2398',
   'https://github.com/libsndfile/libsamplerate/blob/aee38d0bc797d0d1a3774ef574af1d5d248d2398/COPYING',
-  ...Object.keys(thirdPartyLicenses).map(
+  ...thirdPartyLicenseFiles.map(
     (fileName) => `THIRD_PARTY_LICENSES/${fileName}`,
   ),
 ];
 
+const requiredPackageFileEntries = [
+  'LICENSE.md',
+  'THIRD_PARTY_LICENSES',
+  'THIRD_PARTY_NOTICES.md',
+  ...['aac', 'flac', 'mp3'].flatMap((codec) => [
+    `codec-build/${codec}/README.md`,
+    `codec-build/${codec}/bridge.c`,
+    `codec-build/${codec}/build.sh`,
+    `codec-build/${codec}/manifest.json`,
+    `codec-build/${codec}/verify.mjs`,
+  ]),
+  'codec-build/aac/LICENSE.BRIDGE-MPL-2.0.txt',
+  'codec-build/aac/LICENSE.FFMPEG-LGPL-2.1.txt',
+  'scripts/ogg-opus-build-wasm.sh',
+  'scripts/ogg-opus-embed-wasm.mjs',
+  'scripts/codec-asset-package-contract.mjs',
+  'scripts/resampler-build-wasm.sh',
+  'scripts/resampler-embed-wasm.mjs',
+  'scripts/verify-release-state.mjs',
+  'scripts/verify-published-codec-assets.mjs',
+  'vendor',
+];
+const forbiddenDependencies = [
+  '@alexanderolsen/libsamplerate-js',
+  '@mediabunny/flac-encoder',
+  '@mediabunny/mp3-encoder',
+];
+const dependencySections = [
+  packageJson.dependencies,
+  packageJson.devDependencies,
+  packageJson.optionalDependencies,
+  packageJson.peerDependencies,
+];
+const normalizedThirdPartyText = thirdPartyText.replace(/\s+/gu, ' ');
+const missingRequiredNoticeText = requiredNoticeText.find(
+  (required) =>
+    !normalizedThirdPartyText.toLowerCase().includes(required.toLowerCase()),
+);
+
 if (
   packageJson.dependencies?.mediabunny !== '1.50.9' ||
-  packageJson.dependencies?.['@mediabunny/mp3-encoder'] !== '1.50.9' ||
-  packageJson.dependencies?.['@mediabunny/flac-encoder'] !== '1.50.9' ||
-  packageJson.dependencies?.['@alexanderolsen/libsamplerate-js'] !== '2.1.2' ||
-  !packageJson.files?.includes('LICENSE.md') ||
-  !packageJson.files?.includes('THIRD_PARTY_NOTICES.md') ||
-  !packageJson.files?.includes('THIRD_PARTY_LICENSES') ||
-  requiredNoticeText.some((required) => !thirdPartyText.includes(required))
+  dependencySections.some((dependencies) =>
+    forbiddenDependencies.some(
+      (dependency) => dependencies?.[dependency] !== undefined,
+    ),
+  ) ||
+  requiredPackageFileEntries.some(
+    (path) => !packageJson.files?.includes(path),
+  )
 ) {
-  throw new Error('Package legal files and third-party notices must agree');
+  throw new Error('Package dependencies and source-material files must agree');
 }
 
-for (const [fileName, expectedSha256] of Object.entries(thirdPartyLicenses)) {
-  const license = await readFile(
+if (
+  packageJson.scripts?.prepublishOnly !==
+    'node ./scripts/verify-release-state.mjs && pnpm codec-assets:verify-published' ||
+  packageJson.scripts?.['codec-assets:release'] !==
+    'node ./scripts/build-codec-asset-package.mjs --release && node ./scripts/verify-codec-asset-package.mjs --release && npm pack --dry-run --json ./.artifacts/codec-assets-package' ||
+  packageJson.scripts?.['codec-assets:verify-published'] !==
+    'pnpm build && node ./scripts/verify-published-codec-assets.mjs' ||
+  releaseWorkflow.includes('npm publish') ||
+  releaseWorkflow.includes('publish-npm')
+) {
+  throw new Error(
+    'Release automation must stop after Release Please and engine publication must verify the published codec assets',
+  );
+}
+
+if (
+  aacBuildManifest.schemaVersion !== 1 ||
+  aacBuildManifest.artifact?.path !==
+    'src/stream/runtime/aac.generated.mjs' ||
+  aacBuildManifest.artifact?.sizeBytes !== aacSourceArtifact.byteLength ||
+  aacBuildManifest.artifact?.sha256 !== sha256(aacSourceArtifact) ||
+  sha256(aacBuiltArtifact) !== aacBuildManifest.artifact.sha256 ||
+  aacSourceArtifact.byteLength > 64 * 1024 ||
+  containsLargeBase64Literal(aacSourceGlue) ||
+  containsLargeBase64Literal(aacBuiltGlue) ||
+  !aacSourceGlue.includes('instantiateWasm') ||
+  !aacSourceGlue.includes('aac.generated.wasm') ||
+  aacBuildManifest.wasmArtifact?.path !== 'codec-build/aac/aac.wasm' ||
+  aacBuildManifest.wasmArtifact?.sha256 !==
+    codecAssetManifest.assets?.aac?.sha256 ||
+  aacBuildManifest.wasmArtifact?.sizeBytes !==
+    codecAssetManifest.assets?.aac?.bytes ||
+  aacBuildManifest.ffmpeg?.archiveSha256 !==
+    '464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c' ||
+  aacBuildManifest.ffmpeg?.commit !==
+    '38b88335f99e76ed89ff3c93f877fdefce736c13' ||
+  aacBuildManifest.ffmpeg?.license !== 'LGPL-2.1-or-later' ||
+  aacBuildManifest.bridge?.license !== 'MPL-2.0' ||
+  aacBuildManifest.toolchain?.emscriptenVersion !== '5.0.7' ||
+  aacBuildManifest.toolchain?.emccCommit !==
+    '263db4cffa6f9fc2ec514a70abac81362ea41849' ||
+  aacBuildManifest.toolchain?.image !==
+    'emscripten/emsdk@sha256:19b3a361d84262c1cd133a29fb84368678bab32aee47e074fcd83a216566330c' ||
+  !aacBuildReadme.includes('modify the LGPL-covered FFmpeg code and relink') ||
+  !aacBuildScript.includes('--disable-gpl') ||
+  !aacBuildScript.includes('--disable-nonfree') ||
+  !aacBuildScript.includes('--enable-encoder=aac') ||
+  !aacBridgeSource.includes('Mozilla Public') ||
+  !aacBridgeSource.includes('License, v. 2.0') ||
+  !aacBuildManifest.bridge?.licensePath ||
+  !aacBuildManifest.ffmpeg?.licensePath
+) {
+  throw new Error('Bundled AAC artifact and corresponding source must agree');
+}
+
+const expectedOggOpusHash =
+  'b05bdb49b04962aef0e037e66115d799cbc1112d7a3e02e0d0de76b6a6b04f11';
+const expectedOggOpusSha256Pins = [
+  '5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061',
+  '6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1',
+  'f616d3aff9b2034547894ccb8ab56c36cf1a4acb0d922c5d7119f97bbe58642c',
+].sort();
+const expectedOggOpusCommitPins = [
+  '6913738ec5371a88c4af5a80db0ab42bad3de681',
+  'c387d7a7e9537d0041d2c3ae71b7538cc978104e',
+  'e4fe26ef59168ff44f4c23c466e497bf60b3411e',
+].sort();
+const collectUniquePins = (source, length) =>
+  [
+    ...new Set(
+      source.match(
+        new RegExp(`(?<![0-9a-f])[0-9a-f]{${length}}(?![0-9a-f])`, 'gu'),
+      ) ?? [],
+    ),
+  ].sort();
+const oggBuildAssignments = Object.fromEntries(
+  oggOpusBuildScript
+    .split('\n')
+    .map((line) => line.match(/^([A-Z0-9_]+)=([^\s]+)$/u))
+    .filter((match) => match !== null)
+    .map((match) => [match[1], match[2]]),
+);
+if (
+  JSON.stringify(collectUniquePins(oggOpusProvenance, 64)) !==
+    JSON.stringify(expectedOggOpusSha256Pins) ||
+  JSON.stringify(collectUniquePins(oggOpusProvenance, 40)) !==
+    JSON.stringify(expectedOggOpusCommitPins) ||
+  !oggOpusProvenance.includes('Emscripten compiler | tag `4.0.20`') ||
+  codecAssetManifest.assets?.['ogg-opus']?.sha256 !== expectedOggOpusHash ||
+  oggBuildAssignments.EMSCRIPTEN_VERSION !== '4.0.20' ||
+  oggBuildAssignments.EMSDK_COMMIT !==
+    'e4fe26ef59168ff44f4c23c466e497bf60b3411e' ||
+  oggBuildAssignments.LIBOPUSENC_SHA256 !==
+    'f616d3aff9b2034547894ccb8ab56c36cf1a4acb0d922c5d7119f97bbe58642c' ||
+  oggBuildAssignments.LIBOPUS_SHA256 !==
+    '6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1' ||
+  oggBuildAssignments.LIBOGG_SHA256 !==
+    '5c8253428e181840cd20d41f3ca16557a9cc04bad4a3d04cce84808677fa1061' ||
+  !oggOpusBuildScript.includes(
+    'git -C "$OGG_OPUS_EMSDK_ROOT" rev-parse HEAD',
+  )
+) {
+  throw new Error('Bundled Ogg Opus provenance or toolchain pins drifted');
+}
+
+const expectedResamplerHashes = {
+  best: 'dadecff97059b0e7847990ee180517cccdbe6db3e24d4018c33904620a49730d',
+  balanced:
+    '2134656307e866675cbd502030627fa495d80ee77590ca50f29c40ce92c2d226',
+  fast: 'bab40503bf0ed441421a5634b2e2c98aaad5e6b0bf663461fc5b19e779985e27',
+};
+if (
+  Object.entries(expectedResamplerHashes).some(
+    ([quality, expectedSha256]) =>
+      codecAssetManifest.assets?.[`resampler-${quality}`]?.sha256 !==
+      expectedSha256,
+  ) ||
+  !resamplerProvenance.includes(
+    'aee38d0bc797d0d1a3774ef574af1d5d248d2398',
+  ) ||
+  !resamplerProvenance.includes(
+    'deefc369f627b256724c4785bf32de5a839d8672f573aa17b1c89d6974dee3b3',
+  ) ||
+  !resamplerProvenance.includes('Emscripten 5.0.7 image manifest') ||
+  !resamplerProvenance.includes(
+    'emscripten/emsdk@sha256:19b3a361d84262c1cd133a29fb84368678bab32aee47e074fcd83a216566330c',
+  ) ||
+  !resamplerProvenance.includes(
+    '263db4cffa6f9fc2ec514a70abac81362ea41849',
+  ) ||
+  !resamplerProvenance.includes('complete coefficient table') ||
+  !resamplerProvenance.includes('scripts/resampler-build-wasm.sh') ||
+  !resamplerBuildScript.includes('EMSCRIPTEN_VERSION=5.0.7') ||
+  !resamplerBuildScript.includes(
+    "EMSCRIPTEN_IMAGE='emscripten/emsdk@sha256:19b3a361d84262c1cd133a29fb84368678bab32aee47e074fcd83a216566330c'",
+  ) ||
+  !resamplerBuildScript.includes(
+    '--platform linux/arm64/v8',
+  )
+) {
+  throw new Error('Bundled resampler provenance is incomplete');
+}
+
+const expectedCodecAssetIds = [
+  'aac',
+  'flac',
+  'mp3',
+  'ogg-opus',
+  'resampler-fast',
+  'resampler-balanced',
+  'resampler-best',
+];
+if (
+  codecAssetManifest.schemaVersion !== 1 ||
+  codecAssetManifest.abiVersion !== 1 ||
+  JSON.stringify(Object.keys(codecAssetManifest.assets ?? {})) !==
+    JSON.stringify(expectedCodecAssetIds)
+) {
+  throw new Error('Codec asset build manifest identity or ABI drifted');
+}
+
+for (const assetId of expectedCodecAssetIds) {
+  const descriptor = codecAssetManifest.assets[assetId];
+  const bytes = await readFile(
+    new URL(`../codec-assets/${descriptor.path}`, import.meta.url),
+  );
+  if (
+    descriptor.bytes !== bytes.byteLength ||
+    descriptor.sha256 !== sha256(bytes) ||
+    !WebAssembly.validate(bytes)
+  ) {
+    throw new Error(`Codec asset build manifest has an invalid ${assetId} entry`);
+  }
+}
+
+const rawCodecBuilds = {
+  aac: {
+    artifact: aacBuildManifest.wasmArtifact,
+    manifest: aacBuildManifest,
+  },
+  flac: {
+    artifact: flacBuildManifest.artifact,
+    manifest: flacBuildManifest,
+  },
+  mp3: {
+    artifact: mp3BuildManifest.artifact,
+    manifest: mp3BuildManifest,
+  },
+};
+for (const [codec, { artifact, manifest }] of Object.entries(rawCodecBuilds)) {
+  const asset = codecAssetManifest.assets[codec];
+  const bridge = await readFile(
+    new URL(`../${manifest.bridge.path}`, import.meta.url),
+  );
+  if (
+    manifest.schemaVersion !== 1 ||
+    artifact.sha256 !== asset.sha256 ||
+    artifact.sizeBytes !== asset.bytes ||
+    sha256(bridge) !== manifest.bridge.sha256 ||
+    manifest.toolchain?.emscriptenVersion !== '5.0.7' ||
+    manifest.toolchain?.emccCommit !==
+      '263db4cffa6f9fc2ec514a70abac81362ea41849'
+  ) {
+    throw new Error(`${codec} source, relink, and asset manifests drifted`);
+  }
+}
+
+if (
+  flacBuildManifest.abiVersion !== 1 ||
+  flacBuildManifest.bridge?.sourceCommit !==
+    '794b84884f1e23cb6241689b3563190d138bbd9a' ||
+  flacBuildManifest.bridge?.sourcePackage !==
+    '@mediabunny/flac-encoder@1.50.9' ||
+  flacBuildManifest.libflac?.commit !==
+    '3f1ecff843dd1b8c07fbb5f59425a4ec71fe4f6c' ||
+  flacBuildManifest.libflac?.archiveSha256 !==
+    '4ace54db53e274f6c73999a644b0a11410f67e5c35c06e4aaa8e5457bbf59f9d' ||
+  mp3BuildManifest.abiVersion !== 1 ||
+  mp3BuildManifest.bridge?.sourcePackageGitHead !==
+    '794b84884f1e23cb6241689b3563190d138bbd9a' ||
+  mp3BuildManifest.lame?.version !== '3.100' ||
+  mp3BuildManifest.lame?.archiveSha256 !==
+    'ddfe36cab873794038ae2c1210557ad34857a4b6bdc515785d1da9e175b1da1e' ||
+  mp3BuildManifest.runtime?.nestedWorker !== false
+) {
+  throw new Error('Raw FLAC or MP3 provenance manifest drifted');
+}
+
+for (const fileName of thirdPartyLicenseFiles) {
+  await readFile(
     new URL(`../THIRD_PARTY_LICENSES/${fileName}`, import.meta.url),
   );
-  const actualSha256 = createHash('sha256').update(license).digest('hex');
-  if (actualSha256 !== expectedSha256) {
-    throw new Error(
-      `Third-party license ${fileName} is missing or differs from its audited source`,
-    );
-  }
 }
 
 if (
@@ -115,6 +486,167 @@ for (const mapPath of ['../dist/index.js.map']) {
   ) {
     throw new Error(`${mapPath} must embed every referenced source`);
   }
+}
+
+const { stdout: packJson } = await execFileAsync(
+  'npm',
+  ['pack', '--dry-run', '--json', '--ignore-scripts'],
+  {
+    cwd: repositoryRootPath,
+    maxBuffer: 16 * 1024 * 1024,
+  },
+);
+const [packResult] = JSON.parse(packJson);
+const maximumPackedBytes = 512 * 1024;
+const maximumUnpackedBytes = 2 * 1024 * 1024;
+if (
+  packResult === undefined ||
+  !Array.isArray(packResult.files) ||
+  !Number.isSafeInteger(packResult.size) ||
+  !Number.isSafeInteger(packResult.unpackedSize) ||
+  packResult.size > maximumPackedBytes ||
+  packResult.unpackedSize > maximumUnpackedBytes
+) {
+  throw new Error(
+    `Root package must remain below ${maximumPackedBytes} packed and ${maximumUnpackedBytes} unpacked bytes`,
+  );
+}
+const packedPaths = packResult.files.map(({ path }) => path);
+const packedPathSet = new Set(packedPaths);
+const forbiddenGeneratedRuntimeModule =
+  /(?:^|\/)(?:ogg-opus-wasm-binary|resampler-wasm-(?:best|balanced|fast)-binary)\.(?:d\.ts|js|mjs|ts)(?:\.map)?$/u;
+const forbiddenPackedPath = packedPaths.find(
+  (path) => path.endsWith('.wasm') || forbiddenGeneratedRuntimeModule.test(path),
+);
+if (forbiddenPackedPath !== undefined) {
+  throw new Error(
+    `Root package must not contain raw or generated WASM payloads: ${forbiddenPackedPath}`,
+  );
+}
+
+for (const path of packedPaths) {
+  const bytes = await readFile(new URL(`../${path}`, import.meta.url));
+  if (
+    bytes.byteLength >= 4 &&
+    bytes[0] === 0x00 &&
+    bytes[1] === 0x61 &&
+    bytes[2] === 0x73 &&
+    bytes[3] === 0x6d
+  ) {
+    throw new Error(`Root package contains raw WebAssembly bytes: ${path}`);
+  }
+  const source = bytes.toString('utf8');
+  if (
+    containsLargeBase64Literal(source) ||
+    /(?:base64,|['"`])AGFzbQ/u.test(source)
+  ) {
+    throw new Error(`Root package contains an inlined binary payload: ${path}`);
+  }
+}
+
+const requiredPackedEvidence = [
+  'dist/stream/runtime/aac.generated.mjs',
+  ...['aac', 'flac', 'mp3'].flatMap((codec) => [
+    `codec-build/${codec}/README.md`,
+    `codec-build/${codec}/bridge.c`,
+    `codec-build/${codec}/build.sh`,
+    `codec-build/${codec}/manifest.json`,
+    `codec-build/${codec}/verify.mjs`,
+  ]),
+  'codec-build/aac/LICENSE.BRIDGE-MPL-2.0.txt',
+  'codec-build/aac/LICENSE.FFMPEG-LGPL-2.1.txt',
+  'scripts/codec-asset-package-contract.mjs',
+  'scripts/verify-published-codec-assets.mjs',
+  ...thirdPartyLicenseFiles.map(
+    (fileName) => `THIRD_PARTY_LICENSES/${fileName}`,
+  ),
+  'vendor/ogg-opus/ogg-opus-PROVENANCE.md',
+  'vendor/ogg-opus/ogg-opus-libopusenc-bridge.c',
+  'vendor/resampler/libsamplerate-PROVENANCE.md',
+  'vendor/resampler/libsamplerate-bridge.c',
+];
+const missingPackedEvidence = requiredPackedEvidence.find(
+  (path) => !packedPathSet.has(path),
+);
+if (missingPackedEvidence !== undefined) {
+  throw new Error(
+    `Root package is missing source, relink, or license evidence: ${missingPackedEvidence}`,
+  );
+}
+
+if (
+  publicApi.AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE !==
+    '@dsub/audio-transcoder-codecs' ||
+  publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST?.version !==
+    packageJson.version ||
+  publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST?.schemaVersion !== 1 ||
+  publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST?.abiVersion !== 1 ||
+  JSON.stringify(publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST?.assets) !==
+    JSON.stringify(codecAssetManifest.assets) ||
+  !Object.isFrozen(publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST) ||
+  !Object.isFrozen(publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST?.assets) ||
+  !Object.values(
+    publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST?.assets ?? {},
+  ).every(Object.isFrozen) ||
+  typeof publicApi.createAudioTranscoderCodecAssetProvider !== 'function' ||
+  typeof publicApi.createAudioTranscoderJsDelivrAssetSource !== 'function' ||
+  typeof publicApi.createSelfHostedRuntimeAssetSource !== 'function'
+) {
+  throw new Error('Built package does not expose its version-locked asset API');
+}
+
+const jsDelivrSource = publicApi.createAudioTranscoderJsDelivrAssetSource();
+if (
+  jsDelivrSource.kind !== 'jsdelivr' ||
+  jsDelivrSource.packageName !== '@dsub/audio-transcoder-codecs' ||
+  jsDelivrSource.packageVersion !== packageJson.version
+) {
+  throw new Error('Built package exposed an unpinned jsDelivr asset source');
+}
+
+const selfHostedSource = publicApi.createSelfHostedRuntimeAssetSource(
+  'https://assets.example.test/audio/',
+);
+const fastResamplerBytes = await readFile(
+  new URL('../codec-assets/wasm/resampler-fast.wasm', import.meta.url),
+);
+const assetStates = [];
+const assetProvider = publicApi.createAudioTranscoderCodecAssetProvider({
+  source: selfHostedSource,
+  async fetch(input) {
+    if (
+      String(input) !==
+      'https://assets.example.test/audio/wasm/resampler-fast.wasm'
+    ) {
+      throw new Error(`Unexpected package asset request: ${String(input)}`);
+    }
+    return new Response(fastResamplerBytes, {
+      headers: { 'content-length': String(fastResamplerBytes.byteLength) },
+    });
+  },
+});
+const unsubscribeAssetState = assetProvider.subscribe((state) => {
+  assetStates.push(state.phase);
+});
+if (
+  assetProvider.abiVersion !== 1 ||
+  assetProvider.getState('resampler-fast').phase !== 'idle' ||
+  assetProvider.resolveUrl('resampler-fast') !==
+    'https://assets.example.test/audio/wasm/resampler-fast.wasm'
+) {
+  throw new Error('Built package exposed an invalid self-hosted asset provider');
+}
+const loadedFastResampler = await assetProvider.load('resampler-fast');
+unsubscribeAssetState();
+if (
+  sha256(loadedFastResampler) !==
+    codecAssetManifest.assets['resampler-fast'].sha256 ||
+  assetProvider.getState('resampler-fast').phase !== 'ready' ||
+  !assetStates.includes('downloading') ||
+  !assetStates.includes('verifying') ||
+  assetStates.at(-1) !== 'ready'
+) {
+  throw new Error('Built package asset provider failed download verification');
 }
 
 const info = publicApi.getEngineInfo();
@@ -149,7 +681,12 @@ const inspection = publicApi.audioTranscoder.inspect({ data: encoded.data });
 if (
   inspection.container !== 'WAV' ||
   inspection.sampleRate !== 48_000 ||
-  inspection.bitDepth !== 16
+  inspection.bitDepth !== 16 ||
+  inspection.sourceEncoding?.kind !== 'pcm' ||
+  inspection.sourceEncoding.bitDepth !== 16 ||
+  inspection.sourceEncoding.sampleFormat !== 'integer' ||
+  inspection.sourceEncoding.signedness !== 'signed' ||
+  inspection.sourceEncoding.endianness !== 'little'
 ) {
   throw new Error('Built package failed the WAV encode and inspect smoke test');
 }
@@ -187,6 +724,16 @@ const expectedStreamPresets = [
   'wav-pcm24',
   'wav-pcm32',
   'wav-float32',
+  'aiff-pcm16',
+  'aiff-pcm24',
+  'aac-96kbps',
+  'aac-128kbps',
+  'aac-192kbps',
+  'aac-256kbps',
+  'ogg-opus-64kbps',
+  'ogg-opus-96kbps',
+  'ogg-opus-128kbps',
+  'ogg-opus-192kbps',
   'mp3-128kbps',
   'mp3-192kbps',
   'mp3-256kbps',
@@ -231,7 +778,7 @@ if (
       `${id}:${implementation}:${loading}`,
     )
     .join(',') !==
-    'wav:built-in:eager,mp3:bundled-wasm:lazy,flac:bundled-wasm:lazy' ||
+    'wav:built-in:eager,aiff:built-in:eager,aac:runtime-asset:lazy,ogg:runtime-asset:lazy,mp3:runtime-asset:lazy,flac:runtime-asset:lazy' ||
   !mp3SampleRateContractIsValid ||
   streamCapabilities.inputFormats.length === 0 ||
   streamCapabilities.inputFormats.some(
@@ -240,7 +787,7 @@ if (
   ) ||
   codecRuntime.inputAdapters.join(',') !== 'dsub-pcm,mediabunny' ||
   codecRuntime.encoderAdapter !== 'mediabunny' ||
-  codecRuntime.resamplerAdapter !== 'libsamplerate-js' ||
+  codecRuntime.resamplerAdapter !== 'libsamplerate-wasm' ||
   !Object.isFrozen(codecRuntime.inputAdapters) ||
   !Object.isFrozen(codecRuntime) ||
   streamCapabilities.limits.recommendedConcurrency !== 1 ||
@@ -250,6 +797,34 @@ if (
   streamCapabilities.limits.sampleRate.resampling.maximum !== 192_000
 ) {
   throw new Error('Built package exposed an invalid streaming capability matrix');
+}
+
+if (
+  typeof publicApi.getAudioStreamOutputEncodingOptions !== 'function' ||
+  typeof publicApi.getAudioStreamOutputParameters !== 'function' ||
+  typeof publicApi.resolveAudioStreamFormatTarget !== 'function' ||
+  publicApi.AUDIO_STREAM_SOURCE_SAMPLE_RATE !== 'source'
+) {
+  throw new Error('Built package does not expose the semantic output resolver');
+}
+
+const resolvedAiffTarget = publicApi.resolveAudioStreamFormatTarget(
+  {
+    formatId: 'aiff',
+    parameters: { bitDepth: 24 },
+    sampleRate: publicApi.AUDIO_STREAM_SOURCE_SAMPLE_RATE,
+  },
+  inspection,
+);
+if (
+  resolvedAiffTarget.status !== 'resolved' ||
+  resolvedAiffTarget.preset.preset.id !== 'aiff-pcm24' ||
+  resolvedAiffTarget.probeTarget.channels !== 1 ||
+  resolvedAiffTarget.probeTarget.sampleRate !== 48_000 ||
+  resolvedAiffTarget.target.presetId !== 'aiff-pcm24' ||
+  'sampleRate' in resolvedAiffTarget.target
+) {
+  throw new Error('Built package failed the semantic AIFF target smoke test');
 }
 
 const inlineStreamEngine = publicApi.createAudioTranscoderStreamEngine();
@@ -303,7 +878,9 @@ if (
 }
 pool.terminate();
 
-const streamPool = publicApi.createAudioTranscoderStreamWorkerPool();
+const streamPool = publicApi.createAudioTranscoderStreamWorkerPool({
+  codecAssets: { source: selfHostedSource },
+});
 if (
   streamPool.getVersion() !== packageJson.version ||
   streamPool.getCapabilities() !==
@@ -318,6 +895,7 @@ const uncalledWorkerFactory = () => {
   throw new Error('A lazy package smoke test must not create a Worker');
 };
 const defaultEntryStreamPool = publicApi.createAudioTranscoderStreamWorkerPool({
+  codecAssets: { source: selfHostedSource },
   workerFactory: uncalledWorkerFactory,
 });
 if (defaultEntryStreamPool.getCapabilities() !== streamCapabilities) {
@@ -347,3 +925,13 @@ try {
 if (!rejectedUnpairedCapabilities) {
   throw new Error('Unpaired custom stream capabilities must be rejected');
 }
+
+if (missingRequiredNoticeText !== undefined) {
+  throw new Error(
+    `Third-party notices are missing required evidence: ${missingRequiredNoticeText}`,
+  );
+}
+
+console.log(
+  `Verified thin root package (${packResult.size} packed bytes, ${packResult.unpackedSize} unpacked bytes) in ${Math.round(performance.now() - verificationStartedAt)} ms.`,
+);

@@ -1,6 +1,8 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 import {
   AIFF_OUTPUT_PRESETS,
+  AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST,
+  AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
   AUDIO_TRANSCODER_PACKAGE,
   AUDIO_TRANSCODER_VERSION,
   AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES,
@@ -8,19 +10,25 @@ import {
   WAV_OUTPUT_PRESETS,
   audioTranscoder,
   createAudioTranscoderEngine,
+  createAudioTranscoderJsDelivrAssetSource,
+  createSelfHostedRuntimeAssetSource,
+  getAudioStreamOutputParameters,
   getEngineInfo,
   getVersion,
+  resolveAudioStreamFormatTarget,
   type AudioDecodeEstimate,
   type AudioOutputPreset,
   type AudioStreamBuiltInInputFormatDescriptor,
   type AudioStreamBuiltInOutputFormatDescriptor,
-  type AudioStreamBundledWasmOutputFormatDescriptor,
+  type AudioStreamRuntimeAssetOutputFormatDescriptor,
   type AudioStreamInputFormatDescriptor,
   type AudioStreamInputFormatId,
   type AudioStreamInputSupportResult,
   type AudioStreamIntegerOutputPresetId,
   type AudioStreamLosslessOutputPresetDescriptor,
   type AudioStreamLossyOutputPresetDescriptor,
+  type AudioStreamOutputParameterId,
+  type AudioStreamOutputParameterSelection,
   type AudioStreamNonIntegerOutputPresetId,
   type AudioStreamNonWavTarget,
   type AudioStreamNonWavTranscodeResult,
@@ -43,6 +51,7 @@ import {
   type AudioStreamWavTarget,
   type AudioStreamWavTranscodeResult,
   type AudioTranscoderCustomStreamWorkerRuntimeOptions,
+  type AudioTranscoderCodecAssetsConfiguration,
   type AudioTranscoderDefaultStreamWorkerRuntimeOptions,
   type AudioTranscoderPlugin,
   type AudioTranscoderStreamCapabilities,
@@ -73,6 +82,35 @@ describe('public package metadata', () => {
     expect(AUDIO_TRANSCODER_WHOLE_BUFFER_LIMIT_BYTES).toBe(64 * 1024 * 1024);
   });
 
+  it('exposes version-locked codec asset metadata without choosing a CDN', () => {
+    expect(AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE).toBe(
+      '@dsub/audio-transcoder-codecs',
+    );
+    expect(AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version).toBe(
+      AUDIO_TRANSCODER_VERSION,
+    );
+    expect(
+      Object.keys(AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.assets).sort(),
+    ).toEqual([
+      'aac',
+      'flac',
+      'mp3',
+      'ogg-opus',
+      'resampler-balanced',
+      'resampler-best',
+      'resampler-fast',
+    ]);
+    expect(createAudioTranscoderJsDelivrAssetSource()).toEqual({
+      kind: 'jsdelivr',
+      packageName: '@dsub/audio-transcoder-codecs',
+      packageVersion: AUDIO_TRANSCODER_VERSION,
+    });
+    expect(createSelfHostedRuntimeAssetSource('/codec-assets/')).toEqual({
+      baseUrl: '/codec-assets',
+      kind: 'self-hosted',
+    });
+  });
+
   it('returns stable, immutable engine information', () => {
     const info = getEngineInfo();
 
@@ -93,17 +131,28 @@ describe('public stream type surface', () => {
       | AudioStreamRuntimeInputFormatDescriptor
     >();
     expectTypeOf<AudioStreamOutputFormatId>().toEqualTypeOf<
-      'flac' | 'mp3' | 'wav'
+      'aac' | 'aiff' | 'flac' | 'mp3' | 'ogg' | 'wav'
     >();
     expectTypeOf<AudioStreamOutputFormatDescriptor>().toMatchTypeOf<
       | AudioStreamBuiltInOutputFormatDescriptor
-      | AudioStreamBundledWasmOutputFormatDescriptor
+      | AudioStreamRuntimeAssetOutputFormatDescriptor
     >();
     expectTypeOf<AudioStreamOutputPresetDescriptor>().toMatchTypeOf<
       | AudioStreamLosslessOutputPresetDescriptor
       | AudioStreamLossyOutputPresetDescriptor
     >();
     expectTypeOf<AudioStreamOutputPreset['id']>().toMatchTypeOf<string>();
+    expectTypeOf<AudioStreamOutputParameterId>().toEqualTypeOf<
+      'bit-depth' | 'bitrate-bps' | 'codec' | 'sample-format'
+    >();
+    expectTypeOf<AudioStreamOutputParameterSelection>().toMatchTypeOf<{
+      readonly bitDepth?: number;
+      readonly bitrateBps?: number;
+      readonly codec?: string;
+      readonly sampleFormat?: 'float' | 'integer' | 'lossy';
+    }>();
+    expectTypeOf(getAudioStreamOutputParameters).toBeFunction();
+    expectTypeOf(resolveAudioStreamFormatTarget).toBeFunction();
     expectTypeOf<AudioStreamOutputTargetConstraints['sampleRate']>().toEqualTypeOf<
       AudioStreamOutputSampleRateConstraints
     >();
@@ -137,13 +186,18 @@ describe('public stream type surface', () => {
     expectTypeOf<AudioStreamNonWavTarget['presetId']>().toMatchTypeOf<string>();
     expectTypeOf<AudioStreamWavTranscodeResult['format']>().toEqualTypeOf<'wav'>();
     expectTypeOf<AudioStreamNonWavTranscodeResult['format']>().toEqualTypeOf<
-      'flac' | 'mp3'
+      'aac' | 'aiff' | 'flac' | 'mp3' | 'ogg'
     >();
     expectTypeOf<AudioTranscoderStreamWorkerRuntimeOptions>()
       .toMatchTypeOf<
         | AudioTranscoderCustomStreamWorkerRuntimeOptions
         | AudioTranscoderDefaultStreamWorkerRuntimeOptions
       >();
+    expectTypeOf<{
+      runtime: 'default';
+      codecAssets: AudioTranscoderCodecAssetsConfiguration;
+      workerFactory: () => Worker;
+    }>().toMatchTypeOf<CreateAudioTranscoderStreamWorkerEngineOptions>();
     expectTypeOf<{
       runtime: 'custom';
       capabilities: AudioTranscoderStreamCapabilities;

@@ -110,6 +110,36 @@ describe('CodecRegistry decode preflight', () => {
   });
 });
 
+describe('CodecRegistry inspection normalization', () => {
+  it('keeps legacy inspector plugins compatible and supplies unknown encoding', () => {
+    const registry = new CodecRegistry({
+      decoders: [],
+      encoders: [],
+      inspectors: [
+        {
+          formats: ['legacy'],
+          id: 'legacy',
+          inspect: () => ({
+            bitDepth: 32,
+            channels: 1,
+            codec: 'Legacy codec label',
+            container: 'LEGACY',
+            decodeSupport: 'browser-dependent',
+            durationSeconds: null,
+            notes: [],
+            sampleRate: 192_000,
+          }),
+        },
+      ],
+    });
+
+    const inspection = registry.inspect(input());
+
+    expect(inspection.sourceEncoding).toEqual({ kind: 'unknown' });
+    expect(Object.isFrozen(inspection.sourceEncoding)).toBe(true);
+  });
+});
+
 function createRegistry(
   decoders: ConstructorParameters<typeof CodecRegistry>[0]['decoders'],
 ): CodecRegistry {

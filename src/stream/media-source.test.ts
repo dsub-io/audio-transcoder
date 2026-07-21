@@ -109,11 +109,82 @@ describe('MediaBunny streaming source adapter', () => {
       notes: [],
       sampleRate: 48_000,
       size: STREAM_INPUT.blob.size,
+      sourceEncoding: {
+        bitDepth: 24,
+        endianness: 'little',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
     });
     expect(Object.isFrozen(inspection)).toBe(true);
     expect(mocks.inputOptions[0]?.source).toMatchObject({});
     expect(mocks.inputOptions[0]?.source.constructor.name).toBe('CustomSource');
     expect(mocks.inputs[0]?.dispose).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [
+      'pcm-f32be',
+      {
+        bitDepth: 32,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    ],
+    [
+      'pcm-u8',
+      {
+        bitDepth: 8,
+        endianness: 'not-applicable',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'unsigned',
+      },
+    ],
+  ] as const)('structures MediaBunny codec %s', async (codec, expected) => {
+    mocks.getCodec.mockResolvedValue(codec);
+
+    await expect(inspectMediaBlob(STREAM_INPUT, 65_536)).resolves.toMatchObject({
+      bitDepth: expected.bitDepth,
+      sourceEncoding: expected,
+    });
+  });
+
+  it.each([
+    'aac',
+    'ac3',
+    'alaw',
+    'eac3',
+    'mp3',
+    'opus',
+    'ulaw',
+    'vorbis',
+  ] as const)('structures lossy MediaBunny codec %s', async (codec) => {
+    mocks.getCodec.mockResolvedValue(codec);
+
+    await expect(inspectMediaBlob(STREAM_INPUT, 65_536)).resolves.toMatchObject({
+      bitDepth: null,
+      sourceEncoding: {
+        codec,
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      },
+    });
+  });
+
+  it('structures ALAC as lossless compressed source audio', async () => {
+    mocks.getCodec.mockResolvedValue('alac');
+
+    await expect(inspectMediaBlob(STREAM_INPUT, 65_536)).resolves.toMatchObject({
+      sourceEncoding: {
+        bitDepth: null,
+        codec: 'alac',
+        kind: 'lossless-compressed',
+      },
+    });
   });
 
   it('returns null when no registered demuxer can read the Blob', async () => {
@@ -149,6 +220,7 @@ describe('MediaBunny streaming source adapter', () => {
       codec: 'Unknown',
       decodeSupport: 'likely-browser',
       durationSeconds: null,
+      sourceEncoding: { kind: 'unknown' },
     });
   });
 
@@ -159,6 +231,11 @@ describe('MediaBunny streaming source adapter', () => {
     await expect(inspectMediaBlob(STREAM_INPUT, 65_536)).resolves.toMatchObject({
       decodeSupport: 'browser-dependent',
       notes: ['A browser decoder or codec plugin is required.'],
+      sourceEncoding: {
+        bitDepth: null,
+        codec: 'flac',
+        kind: 'lossless-compressed',
+      },
     });
     await expect(
       openMediaBlobSource(STREAM_INPUT, 65_536, 65_536),

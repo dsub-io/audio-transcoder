@@ -105,6 +105,7 @@ export interface AudioStreamResamplerAdapter {
     inputSampleRate: number,
     outputSampleRate: number,
     quality: AudioResampleQuality,
+    signal?: AbortSignal,
   ): Promise<StreamingResampler | null>;
 }
 
@@ -122,6 +123,8 @@ export interface AudioTranscoderStreamCodecRuntime {
 }
 
 export interface CreateAudioTranscoderStreamEngineOptions {
+  /** Verified raw assets for the package runtime; no CDN is selected implicitly. */
+  readonly codecAssets?: import('../../assets/audio-codec-assets.js').AudioTranscoderCodecAssetProvider;
   /** Custom codec adapters. Construct them inside the Worker that uses them. */
   readonly codecRuntime?: AudioTranscoderStreamCodecRuntime;
 }

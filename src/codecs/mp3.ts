@@ -46,39 +46,34 @@ export const mp3Inspector: AudioInspectorAdapter = Object.freeze({
   inspect(input: AudioInput): AudioInspection | null {
     const view = new DataView(input.data);
     const hasId3 = readAscii(view, 0, 3) === 'ID3';
-    const frameOffset = findMp3Frame(view);
-    if (!hasId3 && frameOffset < 0) {
+    const frame = findMp3Frame(view);
+    if (!hasId3 && frame === null) {
       return null;
     }
 
-    if (frameOffset < 0) {
+    if (frame === null) {
       return {
         bitDepth: null,
         channels: null,
-        codec: 'MP3',
-        container: 'MP3',
-        decodeSupport: 'likely-browser',
+        codec: 'Unknown',
+        container: 'ID3',
+        decodeSupport: 'unknown',
         durationSeconds: null,
-        notes: ['No MP3 frame was found in the inspected data.'],
+        notes: ['ID3 metadata was found, but no MPEG Layer III frame was found.'],
         sampleRate: null,
+        sourceEncoding: Object.freeze({ kind: 'unknown' }),
       };
     }
 
-    const header = view.getUint32(frameOffset, false);
-    const versionBits = (header >> 19) & 0x3;
-    const layerBits = (header >> 17) & 0x3;
-    const bitrateIndex = (header >> 12) & 0xf;
-    const sampleRateIndex = (header >> 10) & 0x3;
-    const channelMode = (header >> 6) & 0x3;
+    const { bitrate, channelMode, offset: frameOffset, sampleRate, versionBits } =
+      frame;
     const version =
       versionBits === 3
         ? 'MPEG-1'
         : versionBits === 2
           ? 'MPEG-2'
           : 'MPEG-2.5';
-    const layer = layerBits === 1 ? 'Layer III' : `Layer bits ${layerBits}`;
-    const sampleRate = mp3SampleRate(versionBits, sampleRateIndex);
-    const bitrate = mp3Bitrate(versionBits, layerBits, bitrateIndex);
+    const layer = 'Layer III';
     const audioBytes = Math.max(
       0,
       (input.size ?? input.data.byteLength) - frameOffset,
@@ -90,44 +85,93 @@ export const mp3Inspector: AudioInspectorAdapter = Object.freeze({
       codec: `${version} ${layer}`,
       container: 'MP3',
       decodeSupport: 'likely-browser',
-      durationSeconds:
-        bitrate === null ? null : (audioBytes * 8) / (bitrate * 1000),
-      notes:
-        bitrate === null
-          ? ['Could not estimate the MP3 bitrate.']
-          : [`Estimated bitrate ${bitrate} kbps.`],
+      durationSeconds: (audioBytes * 8) / (bitrate * 1000),
+      notes: [`Estimated bitrate ${bitrate} kbps.`],
       sampleRate,
+      sourceEncoding: Object.freeze({
+        estimatedBitrateBps: bitrate * 1000,
+        codec: 'mp3',
+        kind: 'lossy-compressed',
+      }),
     };
   },
 });
 
-function looksLikeMp3Frame(view: DataView, offset: number): boolean {
+interface Mp3Frame {
+  readonly bitrate: number;
+  readonly channelMode: number;
+  readonly frameLength: number;
+  readonly offset: number;
+  readonly sampleRate: number;
+  readonly sampleRateIndex: number;
+  readonly versionBits: number;
+}
+
+function parseMp3Frame(view: DataView, offset: number): Mp3Frame | null {
+  if (offset + 4 > view.byteLength) {
+    return null;
+  }
   const header = view.getUint32(offset, false);
   const versionBits = (header >> 19) & 0x3;
   const layerBits = (header >> 17) & 0x3;
   const bitrateIndex = (header >> 12) & 0xf;
   const sampleRateIndex = (header >> 10) & 0x3;
-  return (
-    header >>> 21 === 0x7ff &&
-    versionBits !== 1 &&
-    layerBits !== 0 &&
-    bitrateIndex !== 15 &&
-    sampleRateIndex !== 3
-  );
+  if (
+    header >>> 21 !== 0x7ff ||
+    versionBits === 1 ||
+    layerBits !== 1 ||
+    bitrateIndex === 0 ||
+    bitrateIndex === 15 ||
+    sampleRateIndex === 3
+  ) {
+    return null;
+  }
+  const bitrate = mp3Bitrate(versionBits, bitrateIndex);
+  const sampleRate = mp3SampleRate(versionBits, sampleRateIndex);
+  const padding = (header >> 9) & 0x1;
+  const coefficient = versionBits === 3 ? 144_000 : 72_000;
+  const frameLength = Math.floor((coefficient * bitrate) / sampleRate) + padding;
+  if (offset + frameLength > view.byteLength) {
+    return null;
+  }
+  return {
+    bitrate,
+    channelMode: (header >> 6) & 0x3,
+    frameLength,
+    offset,
+    sampleRate,
+    sampleRateIndex,
+    versionBits,
+  };
 }
 
-function findMp3Frame(view: DataView): number {
+function findMp3Frame(view: DataView): Mp3Frame | null {
   let offset = 0;
   if (readAscii(view, 0, 3) === 'ID3' && view.byteLength >= 10) {
     offset = 10 + readSynchsafeInteger(view, 6);
   }
 
   for (let index = offset; index + 4 <= view.byteLength; index += 1) {
-    if (looksLikeMp3Frame(view, index)) {
-      return index;
+    const frame = parseMp3Frame(view, index);
+    if (frame === null) {
+      continue;
+    }
+    const nextOffset = index + frame.frameLength;
+    if (nextOffset === view.byteLength) {
+      return frame;
+    }
+    // A lone frame followed by tags or arbitrary bytes is deliberately not
+    // enough evidence. Files with trailing metadata need two coherent frames.
+    const nextFrame = parseMp3Frame(view, nextOffset);
+    if (
+      nextFrame !== null &&
+      nextFrame.versionBits === frame.versionBits &&
+      nextFrame.sampleRateIndex === frame.sampleRateIndex
+    ) {
+      return frame;
     }
   }
-  return -1;
+  return null;
 }
 
 function readSynchsafeInteger(view: DataView, offset: number): number {
@@ -150,14 +194,7 @@ function mp3SampleRate(versionBits: number, index: number): number {
   return base / 4;
 }
 
-function mp3Bitrate(
-  versionBits: number,
-  layerBits: number,
-  index: number,
-): number | null {
-  if (index === 0 || layerBits !== 1) {
-    return null;
-  }
+function mp3Bitrate(versionBits: number, index: number): number {
   const table =
     versionBits === 3
       ? MPEG_1_LAYER_3_BITRATES

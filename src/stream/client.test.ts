@@ -30,6 +30,13 @@ const INSPECTION: AudioStreamInspection = {
   notes: [],
   sampleRate: 48_000,
   size: 100,
+  sourceEncoding: {
+    bitDepth: 24,
+    endianness: 'little',
+    kind: 'pcm',
+    sampleFormat: 'integer',
+    signedness: 'signed',
+  },
 };
 const PRESET = {
   bitDepth: 16,
@@ -65,6 +72,12 @@ const SUPPORTED_OUTPUT: AudioStreamOutputSupportResult = {
   reason: 'runtime-verified',
   status: 'supported',
 };
+const TEST_CODEC_ASSETS = Object.freeze({
+  source: Object.freeze({
+    baseUrl: '/codec-assets',
+    kind: 'self-hosted' as const,
+  }),
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -104,6 +117,7 @@ describe('stream worker client', () => {
     expect(inspected).not.toBe(INSPECTION);
     expect(Object.isFrozen(inspected)).toBe(true);
     expect(Object.isFrozen(inspected.notes)).toBe(true);
+    expect(Object.isFrozen(inspected.sourceEncoding)).toBe(true);
 
     expect(worker.posts[1]?.message).toMatchObject({
       id: 2,
@@ -161,10 +175,31 @@ describe('stream worker client', () => {
     expect(Object.isFrozen(supportedResult)).toBe(true);
     expect(Object.isFrozen(supportedResult.inspection)).toBe(true);
     expect(Object.isFrozen(supportedResult.inspection.notes)).toBe(true);
+    expect(Object.isFrozen(supportedResult.inspection.sourceEncoding)).toBe(
+      true,
+    );
+
+    const { sourceEncoding, ...legacyInspection } = INSPECTION;
+    expect(sourceEncoding).toBeDefined();
+    const legacy = engine.probeInputSupport(input);
+    worker.emit({
+      id: 2,
+      operation: 'probeInputSupport',
+      type: 'result',
+      value: {
+        inspection: legacyInspection,
+        status: 'supported',
+      },
+    });
+    const legacyResult = await legacy;
+    expect(legacyResult.inspection?.sourceEncoding).toEqual({
+      kind: 'unknown',
+    });
+    expect(Object.isFrozen(legacyResult.inspection?.sourceEncoding)).toBe(true);
 
     const unsupported = engine.probeInputSupport(input);
     worker.emit({
-      id: 2,
+      id: 3,
       operation: 'probeInputSupport',
       type: 'result',
       value: { inspection: null, status: 'unsupported' },
@@ -331,19 +366,34 @@ describe('stream worker client', () => {
       workerFactory: () => worker as unknown as Worker,
     });
 
+    worker.emit({
+      state: {
+        assetName: 'ignored-custom-runtime-state',
+        error: null,
+        loadedBytes: 0,
+        phase: 'idle',
+        totalBytes: null,
+      },
+      type: 'asset-state',
+    });
     expect(engine.getCapabilities()).toBe(capabilities);
+    expect(worker.terminateCalls).toBe(0);
     engine.terminate();
   });
 
   it('keeps custom entries for the default runtime type-safe', () => {
     type Factory = () => Worker;
 
-    expectTypeOf<{}>().toMatchTypeOf<
+    expectTypeOf<{}>().not.toMatchTypeOf<
       CreateAudioTranscoderStreamWorkerEngineOptions
     >();
-    expectTypeOf<{ workerFactory: Factory }>().toMatchTypeOf<
+    expectTypeOf<{ workerFactory: Factory }>().not.toMatchTypeOf<
       CreateAudioTranscoderStreamWorkerEngineOptions
     >();
+    expectTypeOf<{
+      codecAssets: typeof TEST_CODEC_ASSETS;
+      workerFactory: Factory;
+    }>().toMatchTypeOf<CreateAudioTranscoderStreamWorkerEngineOptions>();
     expectTypeOf<{
       runtime: 'custom';
       capabilities: AudioTranscoderStreamCapabilities;
@@ -374,15 +424,177 @@ describe('stream worker client', () => {
   it('uses built-in capabilities with a custom default-runtime entry', () => {
     const worker = new WorkerStub();
     const workerFactory = vi.fn(() => worker as unknown as Worker);
-    const engine = createAudioTranscoderStreamWorkerEngine({ workerFactory });
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: TEST_CODEC_ASSETS,
+      workerFactory,
+    });
 
     expect(workerFactory).toHaveBeenCalledOnce();
     expect(engine.getCapabilities()).toBe(AUDIO_TRANSCODER_STREAM_CAPABILITIES);
     engine.terminate();
   });
 
+  it('configures explicit asset sources and reports verified loading state', async () => {
+    const worker = new WorkerStub();
+    const onStateChange = vi.fn();
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: {
+        fallbackSources: [
+          { baseUrl: '/codec-fallback', kind: 'self-hosted' },
+        ],
+        onStateChange,
+        source: { baseUrl: '/codec-primary', kind: 'self-hosted' },
+      },
+      workerFactory: () => worker as unknown as Worker,
+    });
+
+    expect(worker.configurations).toEqual([
+      {
+        codecAssets: {
+          fallbackSources: [
+            { baseUrl: '/codec-fallback', kind: 'self-hosted' },
+          ],
+          source: { baseUrl: '/codec-primary', kind: 'self-hosted' },
+        },
+        type: 'configure',
+      },
+    ]);
+    worker.emit({ type: 'configured' });
+    worker.emit({
+      state: {
+        assetName: 'aac',
+        error: null,
+        loadedBytes: 4,
+        phase: 'ready',
+        totalBytes: 4,
+      },
+      type: 'asset-state',
+    });
+    worker.emit({
+      state: {
+        assetName: 'ogg-opus',
+        error: { code: 'INTEGRITY_MISMATCH', message: 'digest mismatch' },
+        loadedBytes: 4,
+        phase: 'error',
+        totalBytes: 4,
+      },
+      type: 'asset-state',
+    });
+
+    expect(onStateChange).toHaveBeenCalledTimes(2);
+    expect(onStateChange.mock.calls[0]?.[0]).toEqual({
+      assetName: 'aac',
+      error: null,
+      loadedBytes: 4,
+      phase: 'ready',
+      totalBytes: 4,
+    });
+    expect(onStateChange.mock.calls[1]?.[0]).toMatchObject({
+      assetName: 'ogg-opus',
+      error: { code: 'INTEGRITY_MISMATCH', message: 'digest mismatch' },
+      phase: 'error',
+    });
+    expect(Object.isFrozen(onStateChange.mock.calls[1]?.[0])).toBe(true);
+    engine.terminate();
+    await engine.dispose();
+  });
+
+  it('snapshots an exact jsDelivr asset source for Worker configuration', async () => {
+    const worker = new WorkerStub();
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: {
+        source: {
+          kind: 'jsdelivr',
+          packageName: '@dsub/audio-transcoder-codecs',
+          packageVersion: '1.2.3',
+        },
+      },
+      workerFactory: () => worker as unknown as Worker,
+    });
+
+    expect(worker.configurations).toEqual([
+      {
+        codecAssets: {
+          source: {
+            kind: 'jsdelivr',
+            packageName: '@dsub/audio-transcoder-codecs',
+            packageVersion: '1.2.3',
+          },
+        },
+        type: 'configure',
+      },
+    ]);
+    await engine.dispose();
+  });
+
+  it('isolates asset-state observers and terminates on configuration errors', async () => {
+    const worker = new WorkerStub();
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: {
+        onStateChange() {
+          throw new Error('observer failure');
+        },
+        source: TEST_CODEC_ASSETS.source,
+      },
+      workerFactory: () => worker as unknown as Worker,
+    });
+    const inspection = engine.inspect({ blob: new Blob(['audio']) });
+    worker.emit({
+      state: {
+        assetName: 'aac',
+        error: null,
+        loadedBytes: 0,
+        phase: 'downloading',
+        totalBytes: null,
+      },
+      type: 'asset-state',
+    });
+    worker.emit({
+      error: {
+        code: 'INVALID_CONFIGURATION',
+        message: 'asset ABI mismatch',
+        name: 'AudioTranscoderError',
+      },
+      type: 'configuration-error',
+    });
+
+    await expect(inspection).rejects.toMatchObject({
+      code: 'WORKER_FAILURE',
+      message: expect.stringContaining('asset ABI mismatch'),
+    });
+    expect(worker.terminateCalls).toBe(1);
+  });
+
+  it.each([new Error('clone failed'), 'clone rejected'])(
+    'fails construction if Worker configuration cannot be posted %#',
+    (failure) => {
+      const worker = new WorkerStub();
+      worker.throwOnConfigure = failure;
+
+      expect(() =>
+        createAudioTranscoderStreamWorkerEngine({
+          codecAssets: TEST_CODEC_ASSETS,
+          workerFactory: () => worker as unknown as Worker,
+        }),
+      ).toThrow(
+        expect.objectContaining({
+          code: 'WORKER_FAILURE',
+          message: expect.stringContaining(
+            failure instanceof Error ? failure.message : String(failure),
+          ),
+        }),
+      );
+      expect(worker.terminateCalls).toBe(1);
+    },
+  );
+
   it('rejects invalid runtime and capability combinations from JavaScript', () => {
     const workerFactory = vi.fn(() => new WorkerStub() as unknown as Worker);
+    const nonErrorSource = Object.defineProperty({}, 'kind', {
+      get() {
+        throw 'non-error source failure';
+      },
+    });
     const capabilities = {
       ...AUDIO_TRANSCODER_STREAM_CAPABILITIES,
       codecRuntime: {
@@ -395,6 +607,45 @@ describe('stream worker client', () => {
       1,
       { runtime: 'unknown' },
       { workerFactory: 1 },
+      { codecAssets: null, workerFactory },
+      { codecAssets: { source: undefined }, workerFactory },
+      { codecAssets: { source: nonErrorSource }, workerFactory },
+      {
+        codecAssets: {
+          source: {
+            kind: 'jsdelivr',
+            packageName: 1,
+            packageVersion: '1.2.3',
+          },
+        },
+        workerFactory,
+      },
+      {
+        codecAssets: {
+          source: {
+            kind: 'jsdelivr',
+            packageName: '@dsub/audio-transcoder-codecs',
+            packageVersion: 1,
+          },
+        },
+        workerFactory,
+      },
+      {
+        codecAssets: { source: { baseUrl: 1, kind: 'self-hosted' } },
+        workerFactory,
+      },
+      {
+        codecAssets: { source: { kind: 'unknown' } },
+        workerFactory,
+      },
+      {
+        codecAssets: { onStateChange: 1, source: TEST_CODEC_ASSETS.source },
+        workerFactory,
+      },
+      {
+        codecAssets: { fallbackSources: {}, source: TEST_CODEC_ASSETS.source },
+        workerFactory,
+      },
       { capabilities, workerFactory },
       { capabilities, runtime: 'default', workerFactory },
       { capabilities, runtime: 'custom' },
@@ -403,6 +654,12 @@ describe('stream worker client', () => {
       { capabilities: {}, runtime: 'custom', workerFactory },
       { capabilities: { limits: null }, runtime: 'custom', workerFactory },
       { capabilities: { limits: 1 }, runtime: 'custom', workerFactory },
+      {
+        capabilities,
+        codecAssets: TEST_CODEC_ASSETS,
+        runtime: 'custom',
+        workerFactory,
+      },
     ];
 
     for (const options of invalidOptions) {
@@ -501,13 +758,14 @@ describe('stream worker client', () => {
       }),
     );
 
-    await expect(worker.closePostedOutput(1)).rejects.toBe(closeError);
+    await worker.closePostedOutput(1);
     worker.emit({
-      error: { message: 'worker observed close failure', name: 'Error' },
       id: 1,
-      type: 'error',
+      operation: 'transcode',
+      type: 'result',
+      value: RESULT,
     });
-    await expect(result).rejects.toThrow('worker observed close failure');
+    await expect(result).rejects.toBe(closeError);
     engine.terminate();
   });
 
@@ -614,6 +872,31 @@ describe('stream worker client', () => {
     expect(output.locked).toBe(false);
   });
 
+  it('ignores late Worker-error settlement after disposal wins abort cleanup', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const abortGate = deferred<void>();
+    const abort = vi.fn(() => abortGate.promise);
+    const output = new WritableStream<AudioStreamOutputChunk>({ abort });
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      output,
+    );
+    worker.emit({
+      error: { message: 'Worker failed first', name: 'Error' },
+      id: 1,
+      type: 'error',
+    });
+    await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
+
+    const disposal = engine.dispose();
+    await expect(result).rejects.toMatchObject({ code: 'WORKER_TERMINATED' });
+    expect(output.locked).toBe(false);
+    abortGate.resolve();
+    await disposal;
+  });
+
   it('releases a closed bridge on termination and ignores late settlement', async () => {
     const worker = new WorkerStub();
     const engine = createEngine(worker);
@@ -643,24 +926,140 @@ describe('stream worker client', () => {
     await expect(failed).rejects.toMatchObject({ code: 'WORKER_FAILURE' });
   });
 
-  it('settles an output bridge only once during close and terminate races', async () => {
+  it('aborts after Worker-side close when termination wins before result', async () => {
     const worker = new WorkerStub();
     const engine = createEngine(worker);
-    let finishClose = (): void => undefined;
-    const closeGate = new Promise<void>((resolve) => {
-      finishClose = resolve;
-    });
+    const abort = vi.fn();
+    const close = vi.fn();
+    const output = new WritableStream<AudioStreamOutputChunk>({ abort, close });
     const result = engine.transcode(
       { blob: new Blob(['a']) },
       { presetId: 'wav-pcm16' },
-      new WritableStream({ close: () => closeGate }),
+      output,
     );
-    const close = worker.closePostedOutput(1);
+    await worker.closePostedOutput(1);
 
     engine.terminate();
-    finishClose();
-    await close.catch(() => undefined);
     await expect(result).rejects.toMatchObject({ code: 'WORKER_TERMINATED' });
+    expect(abort).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+    expect(output.locked).toBe(false);
+  });
+
+  it('lets destination close win after a Worker result starts commit', async () => {
+    const firstWorker = new WorkerStub();
+    const secondWorker = new WorkerStub();
+    const { engine } = createReplacingEngine([firstWorker, secondWorker]);
+    const closeGate = deferred<void>();
+    const controller = new AbortController();
+    const abort = vi.fn();
+    const output = new WritableStream<AudioStreamOutputChunk>({
+      abort,
+      close: () => closeGate.promise,
+    });
+    const active = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      output,
+      { signal: controller.signal },
+    );
+    const queued = engine.inspect({ blob: new Blob(['b']) });
+    const closing = firstWorker.closePostedOutput(1);
+    firstWorker.emit({
+      id: 1,
+      operation: 'transcode',
+      type: 'result',
+      value: RESULT,
+    });
+    await flushMicrotasks();
+    expect(secondWorker.posts).toHaveLength(0);
+
+    controller.abort('stop stuck destination close');
+
+    expect(abort).not.toHaveBeenCalled();
+    expect(output.locked).toBe(true);
+    expect(firstWorker.terminateCalls).toBe(0);
+    expect(secondWorker.posts).toHaveLength(0);
+    closeGate.resolve();
+    await closing;
+    await expect(active).resolves.toMatchObject({ bytesWritten: 64 });
+    expect(output.locked).toBe(false);
+    expect(firstWorker.posts[1]?.message).toMatchObject({
+      id: 2,
+      type: 'inspect',
+    });
+    firstWorker.emit({
+      id: 2,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
+    });
+    await queued;
+    await engine.dispose();
+  });
+
+  it('waits for an irreversible commit when disposal starts', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const closeGate = deferred<void>();
+    const close = vi.fn(() => closeGate.promise);
+    const output = new WritableStream<AudioStreamOutputChunk>({ close });
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      output,
+    );
+    await worker.closePostedOutput(1);
+    worker.emit({
+      id: 1,
+      operation: 'transcode',
+      type: 'result',
+      value: RESULT,
+    });
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    const disposal = engine.dispose();
+    const settled = vi.fn();
+    void Promise.all([result, disposal]).then(settled, settled);
+    await flushMicrotasks();
+
+    expect(settled).not.toHaveBeenCalled();
+    expect(output.locked).toBe(true);
+    expect(worker.terminateCalls).toBe(1);
+    closeGate.resolve();
+    await expect(result).resolves.toMatchObject({ bytesWritten: 64 });
+    await disposal;
+    expect(output.locked).toBe(false);
+  });
+
+  it('does not re-abort a bridge already failed by a destination write', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const writeError = new Error('write failed first');
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      new WritableStream<AudioStreamOutputChunk>({
+        write() {
+          throw writeError;
+        },
+      }),
+    );
+    await expect(
+      worker.writePostedOutput(1, {
+        data: new Uint8Array([1]),
+        position: 0,
+        type: 'write',
+      }),
+    ).rejects.toBe(writeError);
+    worker.emit({
+      error: { message: 'Worker observed write failure', name: 'Error' },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toThrow('Worker observed write failure');
+    await engine.dispose();
   });
 
   it('aborts a queued transcode without posting or retaining its output', async () => {
@@ -788,47 +1187,118 @@ describe('stream worker client', () => {
     engine.terminate();
   });
 
-  it('waits for terminal cleanup after running cancellation', async () => {
-    const worker = new WorkerStub();
-    const engine = createEngine(worker);
+  it('retires an unresponsive Worker and drains queued work on a configured replacement', async () => {
+    const firstWorker = new WorkerStub();
+    const secondWorker = new WorkerStub();
+    const { engine, workerFactory } = createReplacingEngine([
+      firstWorker,
+      secondWorker,
+    ]);
     const controller = new AbortController();
     const active = engine.inspect(
       { blob: new Blob(['a']) },
       { signal: controller.signal },
     );
+    const activeRejection = expect(active).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'stop running',
+    });
     const next = engine.inspect({ blob: new Blob(['b']) });
     controller.abort('stop running');
 
-    expect(worker.posts[1]?.message).toEqual({ id: 1, type: 'cancel' });
-    expect(worker.posts).toHaveLength(2);
-    const settled = vi.fn();
-    void active.then(settled, settled);
-    await Promise.resolve();
-    expect(settled).not.toHaveBeenCalled();
-    worker.emit({ id: 1, progress: PROGRESS, type: 'progress' });
-    expect(worker.posts).toHaveLength(2);
-    worker.emit({
+    await activeRejection;
+    expect(firstWorker.posts[1]?.message).toEqual({ id: 1, type: 'cancel' });
+    expect(firstWorker.terminateCalls).toBe(1);
+    expect(secondWorker.configurations).toHaveLength(1);
+    expect(secondWorker.postTypes).toEqual(['configure', 'inspect']);
+    expect(secondWorker.posts[0]?.message).toMatchObject({
+      id: 2,
+      type: 'inspect',
+    });
+    expect(workerFactory).toHaveBeenCalledTimes(2);
+
+    firstWorker.emit({ id: 1, progress: PROGRESS, type: 'progress' });
+    firstWorker.emit({
       error: { message: 'worker canceled', name: 'Error' },
       id: 1,
       type: 'error',
     });
-    await expect(active).rejects.toMatchObject({
-      code: 'OPERATION_ABORTED',
-      message: 'stop running',
+    secondWorker.emit({
+      id: 2,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
     });
-    expect(worker.posts[2]?.message).toMatchObject({ id: 2, type: 'inspect' });
-    worker.emit({ id: 2, operation: 'inspect', type: 'result', value: INSPECTION });
     await next;
-    engine.terminate();
+    await engine.dispose();
+    expect(secondWorker.terminateCalls).toBe(1);
   });
 
-  it('keeps cancellation primary without waiting for the Worker stream to close', async () => {
-    const worker = new WorkerStub();
-    const engine = createEngine(worker);
-    const controller = new AbortController();
-    const abort = vi.fn((_reason: unknown) => {
-      throw new Error('destination abort failed');
+  it('snapshots codec asset sources for replacement Worker generations', async () => {
+    const firstWorker = new WorkerStub();
+    const secondWorker = new WorkerStub();
+    const workers = [firstWorker, secondWorker];
+    const source: { baseUrl: string; kind: 'self-hosted' } = {
+      baseUrl: '/codec-primary/',
+      kind: 'self-hosted',
+    };
+    const fallback: { baseUrl: string; kind: 'self-hosted' } = {
+      baseUrl: '/codec-fallback/',
+      kind: 'self-hosted',
+    };
+    const fallbackSources = [fallback];
+    let workerIndex = 0;
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: { fallbackSources, source },
+      maxQueued: 1,
+      workerFactory() {
+        return workers[workerIndex++] as unknown as Worker;
+      },
     });
+
+    source.baseUrl = '/mutated-primary';
+    fallback.baseUrl = '/mutated-fallback';
+    fallbackSources.push({
+      baseUrl: '/new-fallback',
+      kind: 'self-hosted',
+    });
+
+    const controller = new AbortController();
+    const input = { blob: new Blob(['snapshot']) };
+    const active = engine.inspect(input, { signal: controller.signal });
+    const queued = engine.inspect(input);
+    controller.abort('replace snapshot Worker');
+
+    await expect(active).rejects.toMatchObject({ code: 'OPERATION_ABORTED' });
+    expect(firstWorker.configurations).toEqual([
+      {
+        codecAssets: {
+          fallbackSources: [
+            { baseUrl: '/codec-fallback', kind: 'self-hosted' },
+          ],
+          source: { baseUrl: '/codec-primary', kind: 'self-hosted' },
+        },
+        type: 'configure',
+      },
+    ]);
+    expect(secondWorker.configurations).toEqual(firstWorker.configurations);
+    secondWorker.emit({
+      id: 2,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
+    });
+    await queued;
+    await engine.dispose();
+  });
+
+  it('aborts and unlocks output without waiting for an unresponsive Worker', async () => {
+    const firstWorker = new WorkerStub();
+    const secondWorker = new WorkerStub();
+    const { engine } = createReplacingEngine([firstWorker, secondWorker]);
+    const controller = new AbortController();
+    const destinationAbort = deferred<void>();
+    const abort = vi.fn((_reason: unknown) => destinationAbort.promise);
     const output = new WritableStream<AudioStreamOutputChunk>({ abort });
     const active = engine.transcode(
       { blob: new Blob(['a']) },
@@ -836,12 +1306,14 @@ describe('stream worker client', () => {
       output,
       { signal: controller.signal },
     );
+    const activeRejection = expect(active).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'stop transcode',
+    });
     const next = engine.inspect({ blob: new Blob(['b']) });
-    const settled = vi.fn();
-    void active.then(settled, settled);
 
     controller.abort('stop transcode');
-    await flushMicrotasks();
+    await activeRejection;
 
     expect(abort).toHaveBeenCalledOnce();
     expect(abort.mock.calls[0]?.[0]).toMatchObject({
@@ -849,39 +1321,184 @@ describe('stream worker client', () => {
       message: 'stop transcode',
     });
     expect(output.locked).toBe(false);
-    expect(settled).not.toHaveBeenCalled();
-    expect(worker.posts).toHaveLength(2);
-    expect(worker.posts[1]?.message).toEqual({ id: 1, type: 'cancel' });
-
-    worker.emit({ id: 1, operation: 'transcode', type: 'result', value: RESULT });
-    await expect(active).rejects.toMatchObject({
-      code: 'OPERATION_ABORTED',
-      message: 'stop transcode',
-    });
-    expect(worker.posts[2]?.message).toMatchObject({ id: 2, type: 'inspect' });
-    worker.emit({ id: 2, operation: 'inspect', type: 'result', value: INSPECTION });
+    expect(firstWorker.posts[1]?.message).toEqual({ id: 1, type: 'cancel' });
+    expect(firstWorker.terminateCalls).toBe(1);
+    expect(secondWorker.posts[0]?.message).toMatchObject({ id: 2, type: 'inspect' });
+    secondWorker.emit({ id: 2, operation: 'inspect', type: 'result', value: INSPECTION });
     await next;
-    engine.terminate();
+    destinationAbort.resolve();
+    await engine.dispose();
   });
 
-  it('preserves a local cancellation when the Worker fails during cleanup', async () => {
-    const worker = new WorkerStub();
-    const engine = createEngine(worker);
+  it('ignores late failures from a retired Worker generation', async () => {
+    const firstWorker = new WorkerStub();
+    const secondWorker = new WorkerStub();
+    const { engine } = createReplacingEngine([firstWorker, secondWorker]);
     const controller = new AbortController();
     const active = engine.inspect(
       { blob: new Blob(['a']) },
       { signal: controller.signal },
     );
-    const queued = engine.inspect({ blob: new Blob(['b']) });
-    controller.abort('stop running');
-    worker.emitError('cleanup crashed');
-
-    await expect(active).rejects.toMatchObject({
+    const activeRejection = expect(active).rejects.toMatchObject({
       code: 'OPERATION_ABORTED',
       message: 'stop running',
     });
-    await expect(queued).rejects.toMatchObject({ code: 'WORKER_FAILURE' });
-    expect(worker.terminateCalls).toBe(1);
+    const queued = engine.inspect({ blob: new Blob(['b']) });
+    controller.abort('stop running');
+    firstWorker.emitError('retired Worker crashed late');
+    firstWorker.emitMessageError();
+
+    await activeRejection;
+    expect(secondWorker.posts[0]?.message).toMatchObject({
+      id: 2,
+      type: 'inspect',
+    });
+    secondWorker.emit({
+      id: 2,
+      operation: 'inspect',
+      type: 'result',
+      value: INSPECTION,
+    });
+    await expect(queued).resolves.toMatchObject(INSPECTION);
+    expect(firstWorker.terminateCalls).toBe(1);
+    await engine.dispose();
+  });
+
+  it.each([
+    new Error('replacement factory failed'),
+    'replacement factory failed',
+  ])('fails all queued work when replacement Worker creation fails %#', async (failure) => {
+    const firstWorker = new WorkerStub();
+    const workerFactory = vi
+      .fn<() => Worker>()
+      .mockReturnValueOnce(firstWorker as unknown as Worker)
+      .mockImplementationOnce(() => {
+        throw failure;
+      });
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: TEST_CODEC_ASSETS,
+      maxQueued: 2,
+      workerFactory,
+    });
+    const controller = new AbortController();
+    const input = { blob: new Blob(['a']) };
+    const active = engine.inspect(input, { signal: controller.signal });
+    const firstQueued = engine.inspect(input);
+    const secondQueued = engine.inspect(input);
+    const activeRejection = expect(active).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+      message: 'replace failed Worker',
+    });
+    const firstQueuedRejection = expect(firstQueued).rejects.toMatchObject({
+      code: 'WORKER_FAILURE',
+      message: expect.stringContaining('replacement factory failed'),
+    });
+    const secondQueuedRejection = expect(secondQueued).rejects.toMatchObject({
+      code: 'WORKER_FAILURE',
+      message: expect.stringContaining('replacement factory failed'),
+    });
+
+    controller.abort('replace failed Worker');
+
+    await Promise.all([
+      activeRejection,
+      firstQueuedRejection,
+      secondQueuedRejection,
+    ]);
+    expect(firstWorker.terminateCalls).toBe(1);
+    expect(workerFactory).toHaveBeenCalledTimes(2);
+    await expect(engine.inspect(input)).rejects.toMatchObject({
+      code: 'WORKER_TERMINATED',
+    });
+    await engine.dispose();
+  });
+
+  it('fails replacement work without waiting for destination abort cleanup', async () => {
+    const firstWorker = new WorkerStub();
+    const workerFactory = vi
+      .fn<() => Worker>()
+      .mockReturnValueOnce(firstWorker as unknown as Worker)
+      .mockImplementationOnce(() => {
+        throw new Error('replacement factory failed');
+      });
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: TEST_CODEC_ASSETS,
+      maxQueued: 2,
+      workerFactory,
+    });
+    const controller = new AbortController();
+    const input = { blob: new Blob(['a']) };
+    const destinationAbort = deferred<void>();
+    const abort = vi.fn(() => destinationAbort.promise);
+    const output = new WritableStream<AudioStreamOutputChunk>({ abort });
+    const active = engine.inspect(input, { signal: controller.signal });
+    const transcode = engine.transcode(
+      input,
+      { presetId: 'wav-pcm16' },
+      output,
+    );
+    const queued = engine.inspect(input);
+    const activeRejection = expect(active).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+    });
+    const transcodeRejection = expect(transcode).rejects.toMatchObject({
+      code: 'WORKER_FAILURE',
+      message: expect.stringContaining('replacement factory failed'),
+    });
+    const queuedRejection = expect(queued).rejects.toMatchObject({
+      code: 'WORKER_FAILURE',
+      message: expect.stringContaining('replacement factory failed'),
+    });
+
+    controller.abort('replace failed Worker');
+
+    await Promise.all([
+      activeRejection,
+      transcodeRejection,
+      queuedRejection,
+    ]);
+    expect(abort).toHaveBeenCalledOnce();
+    expect(output.locked).toBe(false);
+    expect(firstWorker.terminateCalls).toBe(1);
+
+    const disposal = engine.dispose();
+    let disposed = false;
+    void disposal.then(() => {
+      disposed = true;
+    });
+    await flushMicrotasks();
+    expect(disposed).toBe(false);
+    destinationAbort.resolve();
+    await disposal;
+  });
+
+  it('fails queued work when replacement Worker configuration fails', async () => {
+    const firstWorker = new WorkerStub();
+    const replacementWorker = new WorkerStub();
+    replacementWorker.throwOnConfigure = new Error('replacement config failed');
+    const { engine } = createReplacingEngine([
+      firstWorker,
+      replacementWorker,
+    ]);
+    const controller = new AbortController();
+    const input = { blob: new Blob(['a']) };
+    const active = engine.inspect(input, { signal: controller.signal });
+    const queued = engine.inspect(input);
+    const activeRejection = expect(active).rejects.toMatchObject({
+      code: 'OPERATION_ABORTED',
+    });
+    const queuedRejection = expect(queued).rejects.toMatchObject({
+      code: 'WORKER_FAILURE',
+      message: expect.stringContaining('replacement config failed'),
+    });
+
+    controller.abort('replacement config stopped');
+
+    await Promise.all([activeRejection, queuedRejection]);
+    expect(firstWorker.terminateCalls).toBe(1);
+    expect(replacementWorker.terminateCalls).toBe(1);
+    expect(replacementWorker.posts).toHaveLength(0);
+    await engine.dispose();
   });
 
   it('cancels when a progress listener fails, even if cancel posting fails', async () => {
@@ -1078,13 +1695,13 @@ describe('stream worker client', () => {
     });
     await flushMicrotasks();
     expect(disposed).toBe(false);
-    expect(firstOutput.locked).toBe(true);
-    expect(secondOutput.locked).toBe(true);
+    expect(firstOutput.locked).toBe(false);
+    expect(secondOutput.locked).toBe(false);
 
     firstAbort.resolve();
     await flushMicrotasks();
     expect(firstOutput.locked).toBe(false);
-    expect(secondOutput.locked).toBe(true);
+    expect(secondOutput.locked).toBe(false);
     expect(disposed).toBe(false);
 
     secondAbort.resolve();
@@ -1099,7 +1716,11 @@ describe('stream worker client', () => {
     (maxQueued) => {
       const workerFactory = vi.fn();
       expect(() =>
-        createAudioTranscoderStreamWorkerEngine({ maxQueued, workerFactory }),
+        createAudioTranscoderStreamWorkerEngine({
+          codecAssets: TEST_CODEC_ASSETS,
+          maxQueued,
+          workerFactory,
+        }),
       ).toThrow(expect.objectContaining({ code: 'INVALID_CONFIGURATION' }));
       expect(workerFactory).not.toHaveBeenCalled();
     },
@@ -1157,7 +1778,9 @@ describe('stream worker client', () => {
       return worker;
     });
     vi.stubGlobal('Worker', WorkerConstructor);
-    const engine = createAudioTranscoderStreamWorkerEngine();
+    const engine = createAudioTranscoderStreamWorkerEngine({
+      codecAssets: TEST_CODEC_ASSETS,
+    });
     expect(WorkerConstructor).toHaveBeenCalledWith(expect.any(URL), {
       name: 'dsub-audio-stream-transcoder',
       type: 'module',
@@ -1165,7 +1788,11 @@ describe('stream worker client', () => {
     engine.terminate();
 
     vi.stubGlobal('Worker', undefined);
-    expect(() => createAudioTranscoderStreamWorkerEngine()).toThrow(
+    expect(() =>
+      createAudioTranscoderStreamWorkerEngine({
+        codecAssets: TEST_CODEC_ASSETS,
+      }),
+    ).toThrow(
       expect.objectContaining({ code: 'WORKER_UNAVAILABLE' }),
     );
   });
@@ -1183,9 +1810,12 @@ class WorkerStub {
     messageerror: [] as (() => void)[],
   };
   readonly posts: WorkerPost[] = [];
+  readonly postTypes: AudioStreamWorkerRequest['type'][] = [];
+  readonly configurations: AudioStreamWorkerRequest[] = [];
   terminateCalls = 0;
   throwNextOperation = false;
   throwOnCancel = false;
+  throwOnConfigure: unknown | undefined;
 
   addEventListener(type: string, listener: EventListener): void {
     if (type === 'message') {
@@ -1223,6 +1853,14 @@ class WorkerStub {
     message: AudioStreamWorkerRequest,
     transfer: Transferable[] = [],
   ): void {
+    this.postTypes.push(message.type);
+    if (message.type === 'configure') {
+      if (this.throwOnConfigure !== undefined) {
+        throw this.throwOnConfigure;
+      }
+      this.configurations.push(message);
+      return;
+    }
     if (message.type === 'cancel' && this.throwOnCancel) {
       throw new Error('cancel failed');
     }
@@ -1285,7 +1923,28 @@ function createEngine(
   const workerFactory = () => worker as unknown as Worker;
   return options.runtime === 'custom'
     ? createAudioTranscoderStreamWorkerEngine({ ...options, workerFactory })
-    : createAudioTranscoderStreamWorkerEngine({ ...options, workerFactory });
+    : createAudioTranscoderStreamWorkerEngine({
+        ...options,
+        codecAssets: TEST_CODEC_ASSETS,
+        workerFactory,
+      });
+}
+
+function createReplacingEngine(workers: readonly WorkerStub[]) {
+  let index = 0;
+  const workerFactory = vi.fn(() => {
+    const worker = workers[index];
+    index += 1;
+    if (worker === undefined) {
+      throw new Error('No replacement Worker was configured for this test.');
+    }
+    return worker as unknown as Worker;
+  });
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: TEST_CODEC_ASSETS,
+    workerFactory,
+  });
+  return { engine, workerFactory };
 }
 
 type EngineHarnessOptions =

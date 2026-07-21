@@ -11,7 +11,7 @@ describe('CAF LPCM codec', () => {
     const data = createCaf({
       bitDepth: 16,
       channels: 2,
-      flags: 6,
+      flags: 0,
       payload: int16Payload([16_384, -16_384, 32_767, -32_768], false),
     });
     const inspection = engine.inspect({ data });
@@ -24,6 +24,13 @@ describe('CAF LPCM codec', () => {
       container: 'CAF',
       decodeSupport: 'built-in',
       sampleRate: 48_000,
+      sourceEncoding: {
+        bitDepth: 16,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
     });
     expect(inspection.durationSeconds).toBeCloseTo(2 / 48_000, 10);
     expect(cafDecoder.estimateDecodedPcm?.({ data })).toEqual({
@@ -43,11 +50,20 @@ describe('CAF LPCM codec', () => {
     const data = createCaf({
       bitDepth: 32,
       channels: 1,
-      flags: 1,
+      flags: 3,
       payload: new Uint8Array(payload),
     });
 
-    expect(engine.inspect({ data }).codec).toBe('lpcm float LE');
+    expect(engine.inspect({ data })).toMatchObject({
+      codec: 'lpcm float LE',
+      sourceEncoding: {
+        bitDepth: 32,
+        endianness: 'little',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    });
     expect([...(await engine.decode({ data })).channelData[0]!]).toEqual([
       0.25,
       -0.75,
@@ -60,7 +76,7 @@ describe('CAF LPCM codec', () => {
     const data = createCaf({
       bitDepth: 64,
       bytesPerPacket: 8,
-      flags: 1,
+      flags: 3,
       payload: new Uint8Array(payload),
     });
 
@@ -69,15 +85,24 @@ describe('CAF LPCM codec', () => {
     ]);
   });
 
-  it('decodes unsigned 8-bit integer PCM', async () => {
+  it('decodes signed 8-bit integer PCM', async () => {
     const data = createCaf({
       bitDepth: 8,
       channels: 1,
       flags: 0,
-      payload: new Uint8Array([0, 128, 255]),
+      payload: new Uint8Array([128, 0, 127]),
     });
 
-    expect(engine.inspect({ data }).codec).toBe('lpcm unsigned int LE');
+    expect(engine.inspect({ data })).toMatchObject({
+      codec: 'lpcm signed int BE',
+      sourceEncoding: {
+        bitDepth: 8,
+        endianness: 'not-applicable',
+        kind: 'pcm',
+        sampleFormat: 'integer',
+        signedness: 'signed',
+      },
+    });
     expect([...(await engine.decode({ data })).channelData[0]!]).toEqual([
       -1,
       0,
@@ -109,34 +134,64 @@ describe('CAF LPCM codec', () => {
     });
   });
 
-  it.each([16, 24, 32])(
-    'rejects unsigned %i-bit integer PCM before decoding',
+  it.each([16, 24, 32] as const)(
+    'decodes little-endian signed %i-bit integer PCM',
     async (bitDepth) => {
       const data = createCaf({
         bitDepth,
         bytesPerPacket: bitDepth / 8,
-        flags: 0,
+        flags: 2,
         payload: new Uint8Array(bitDepth / 8),
       });
 
       expect(cafInspector.inspect({ data })).toMatchObject({
-        decodeSupport: 'browser-dependent',
-        notes: [
-          'CAF LPCM sample representation requires a codec plugin.',
-        ],
+        codec: `lpcm signed int LE`,
+        decodeSupport: 'built-in',
+        notes: [],
+        sourceEncoding: {
+          bitDepth,
+          endianness: 'little',
+          kind: 'pcm',
+          sampleFormat: 'integer',
+          signedness: 'signed',
+        },
       });
-      await expect(engine.decode({ data })).rejects.toMatchObject({
-        code: 'UNSUPPORTED_INPUT',
-      });
+      expect([...(await engine.decode({ data })).channelData[0]!]).toEqual([0]);
     },
   );
+
+  it('decodes big-endian floating-point PCM', async () => {
+    const payload = new ArrayBuffer(4);
+    new DataView(payload).setFloat32(0, -0.25, false);
+    const data = createCaf({
+      bitDepth: 32,
+      bytesPerPacket: 4,
+      flags: 1,
+      payload: new Uint8Array(payload),
+    });
+
+    expect(cafInspector.inspect({ data })).toMatchObject({
+      codec: 'lpcm float BE',
+      decodeSupport: 'built-in',
+      sourceEncoding: {
+        bitDepth: 32,
+        endianness: 'big',
+        kind: 'pcm',
+        sampleFormat: 'float',
+        signedness: 'not-applicable',
+      },
+    });
+    expect([...(await engine.decode({ data })).channelData[0]!]).toEqual([
+      -0.25,
+    ]);
+  });
 
   it('supports an indefinite final data chunk using the logical file size', () => {
     const data = createCaf({
       bitDepth: 16,
       channels: 1,
       dataChunkSize: -1n,
-      flags: 4,
+      flags: 2,
       payload: int16Payload([0, 1], true),
     });
     const inspection = cafInspector.inspect({ data, size: data.byteLength });
@@ -149,7 +204,7 @@ describe('CAF LPCM codec', () => {
       bitDepth: 16,
       channels: 1,
       dataChunkSize: 1_000n,
-      flags: 4,
+      flags: 2,
       payload: int16Payload([0, 1], true),
     });
 
@@ -169,34 +224,164 @@ describe('CAF LPCM codec', () => {
       framesPerPacket: 1024,
       payload: new Uint8Array([1, 2]),
     });
+    const losslessCompressed = createCaf({
+      bitDepth: 0,
+      bytesPerPacket: 0,
+      channels: 2,
+      flags: 3,
+      formatId: 'alac',
+      framesPerPacket: 4096,
+      payload: new Uint8Array([1, 2]),
+    });
     const missing = createCaf({ includeDescription: false });
 
     expect(cafInspector.inspect({ data: compressed })).toMatchObject({
-      codec: 'aac  unsigned int LE',
+      bitDepth: null,
+      codec: 'aac',
       decodeSupport: 'browser-dependent',
       durationSeconds: null,
       notes: ['Compressed CAF requires a browser decoder or codec plugin.'],
+      sourceEncoding: {
+        estimatedBitrateBps: null,
+        codec: 'aac',
+        kind: 'lossy-compressed',
+      },
+    });
+    expect(cafInspector.inspect({ data: losslessCompressed })).toMatchObject({
+      sourceEncoding: {
+        bitDepth: 24,
+        codec: 'alac',
+        kind: 'lossless-compressed',
+      },
+    });
+    expect(
+      cafInspector.inspect({
+        data: createCaf({
+          bitDepth: 0,
+          bytesPerPacket: 0,
+          flags: 99,
+          formatId: 'alac',
+          framesPerPacket: 4096,
+        }),
+      }),
+    ).toMatchObject({
+      bitDepth: null,
+      codec: 'alac',
+      sourceEncoding: {
+        bitDepth: null,
+        codec: 'alac',
+        kind: 'lossless-compressed',
+      },
     });
     expect(cafInspector.inspect({ data: missing })).toMatchObject({
       codec: 'Unknown',
       notes: ['CAF desc chunk was not found.'],
+      sourceEncoding: { kind: 'unknown' },
     });
     await expect(cafDecoder.decode({ data: compressed })).rejects.toThrowError(
       expect.objectContaining({ code: 'UNSUPPORTED_INPUT' }),
     );
   });
 
-  it.each([16, 32])(
-    'routes unsupported LPCM layout flag %i to plugins',
-    async (layoutFlag) => {
+  it.each([
+    [1, 16],
+    [2, 20],
+    [3, 24],
+    [4, 32],
+  ] as const)('maps CAF ALAC source-depth flag %i to %i-bit', (flags, bitDepth) => {
+    const data = createCaf({
+      bitDepth: 0,
+      bytesPerPacket: 0,
+      flags,
+      formatId: 'alac',
+      framesPerPacket: 4096,
+    });
+
+    expect(cafInspector.inspect({ data })?.sourceEncoding).toEqual({
+      bitDepth,
+      codec: 'alac',
+      kind: 'lossless-compressed',
+    });
+  });
+
+  it.each([
+    [0, null],
+    [1, 16],
+    [3, 24],
+  ] as const)('maps CAF FLAC source-depth flag %i to %s', (flags, bitDepth) => {
+    const data = createCaf({
+      bitDepth: 0,
+      bytesPerPacket: 0,
+      flags,
+      formatId: 'flac',
+      framesPerPacket: 4096,
+    });
+
+    expect(cafInspector.inspect({ data })?.sourceEncoding).toEqual({
+      bitDepth,
+      codec: 'flac',
+      kind: 'lossless-compressed',
+    });
+  });
+
+  it('normalizes the CAF MP3 FourCC to the canonical codec ID', () => {
+    const data = createCaf({
+      bitDepth: 0,
+      bytesPerPacket: 0,
+      channels: 2,
+      flags: 0,
+      formatId: '.mp3',
+      framesPerPacket: 1_152,
+      payload: new Uint8Array([1, 2]),
+    });
+
+    expect(cafInspector.inspect({ data })?.sourceEncoding).toEqual({
+      codec: 'mp3',
+      estimatedBitrateBps: null,
+      kind: 'lossy-compressed',
+    });
+  });
+
+  it.each([
+    ['flac', { bitDepth: null, codec: 'flac', kind: 'lossless-compressed' }],
+    [
+      'opus',
+      {
+        codec: 'opus',
+        estimatedBitrateBps: null,
+        kind: 'lossy-compressed',
+      },
+    ],
+    ['zzzz', { kind: 'unknown' }],
+  ] as const)('classifies CAF codec %s', (formatId, sourceEncoding) => {
+    const data = createCaf({
+      bitDepth: 0,
+      bytesPerPacket: 0,
+      channels: 2,
+      flags: 0,
+      formatId,
+      framesPerPacket: 1_024,
+      payload: new Uint8Array([1, 2]),
+    });
+
+    expect(cafInspector.inspect({ data })?.sourceEncoding).toEqual(
+      sourceEncoding,
+    );
+  });
+
+  it.each([4, 16, 32])(
+    'routes unknown LPCM flag bit %i to plugins',
+    async (unknownFlag) => {
       const data = createCaf({
-        flags: 4 | layoutFlag,
+        flags: unknownFlag,
         payload: int16Payload([0], false),
       });
 
       expect(cafInspector.inspect({ data })).toMatchObject({
         decodeSupport: 'browser-dependent',
-        notes: ['CAF LPCM layout requires a codec plugin.'],
+        notes: [
+          'CAF LPCM sample representation requires a codec plugin.',
+        ],
       });
       await expect(cafDecoder.decode({ data })).rejects.toThrowError(
         expect.objectContaining({ code: 'UNSUPPORTED_INPUT' }),
@@ -243,7 +428,7 @@ describe('CAF LPCM codec', () => {
     ['bytes per packet', DESC_BYTES_PER_PACKET, 'uint32'],
     ['bit depth', DESC_BIT_DEPTH, 'uint32'],
   ] as const)('rejects invalid %s', async (_field, offset, kind) => {
-    const data = createCaf({ payload: int16Payload([0], true) });
+    const data = createCaf({ payload: int16Payload([0], false) });
     const view = new DataView(data);
     if (kind === 'float64') {
       view.setFloat64(offset, 0, false);
@@ -274,7 +459,7 @@ describe('CAF LPCM codec', () => {
 
   it('rejects a non-finite sample rate', async () => {
     const data = createCaf({
-      payload: int16Payload([0], true),
+      payload: int16Payload([0], false),
       sampleRate: Number.POSITIVE_INFINITY,
     });
 
@@ -380,7 +565,7 @@ function createCaf(options: CafFixtureOptions = {}): ArrayBuffer {
     const dataOffset = chunkOffset + 12;
     view.setFloat64(dataOffset, options.sampleRate ?? 48_000, false);
     writeAscii(view, dataOffset + 8, options.formatId ?? 'lpcm');
-    view.setUint32(dataOffset + 12, options.flags ?? 4, false);
+    view.setUint32(dataOffset + 12, options.flags ?? 0, false);
     view.setUint32(dataOffset + 16, bytesPerPacket, false);
     view.setUint32(dataOffset + 20, framesPerPacket, false);
     view.setUint32(dataOffset + 24, channels, false);
