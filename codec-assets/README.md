@@ -1,10 +1,11 @@
-# @dsub/audio-transcoder-codecs
+# Codec runtime assets
 
 Version-matched raw WebAssembly assets for `@dsub/audio-transcoder`.
 
-Each published package version corresponds to the public source tag with the
-same version at `dsub-io/audio-transcoder`. That tag contains the modified
-bridges, build scripts, manifests, verifiers, notices, and relink instructions.
+These files are part of the public GitHub release tag matching the engine
+version; they are not published as a separate npm package. That tag contains
+the modified bridges, build scripts, manifests, verifiers, notices, and relink
+instructions.
 `THIRD_PARTY_NOTICES.md` records the exact upstream archive URLs and SHA-256
 digests. Do not substitute a branch, `latest`, or a version range when locating
 source for a released binary.
@@ -14,7 +15,7 @@ pass an explicit primary source to the default stream Worker. Optional fallback
 sources are tried sequentially in configuration order after the preceding
 source fails to load or verify; sources are never raced.
 
-The engine package embeds a schema-version-1 manifest containing this package's
+The engine package embeds a schema-version-1 manifest containing the release's
 exact version, ABI version, stable asset paths, decoded raw byte counts, and
 SHA-256 digests. Provider creation validates the schema and ABI contract. A
 jsDelivr source must also use the exact manifest version. Every response is
@@ -44,10 +45,10 @@ The helper reads the exact version baked into the engine. If that version is
 `1.2.3`, the stable URL for AAC is exactly:
 
 ```text
-https://cdn.jsdelivr.net/npm/@dsub/audio-transcoder-codecs@1.2.3/wasm/aac.wasm
+https://cdn.jsdelivr.net/gh/dsub-io/audio-transcoder@v1.2.3/codec-assets/wasm/aac.wasm
 ```
 
-`1.2.3` is illustrative. Never substitute `latest`, a dist-tag, or a SemVer
+`1.2.3` is illustrative. Never substitute a branch, `latest`, or a SemVer
 range. The no-argument helper can produce only the baked exact version. If an
 application uses the lower-level jsDelivr source constructor, provider creation
 rejects a version that differs from the engine manifest.
@@ -102,7 +103,7 @@ WASM.
 - `wasm/resampler-balanced.wasm`
 - `wasm/resampler-best.wasm`
 
-WAV and AIFF do not use this package. Selecting or probing one of the four
+WAV and AIFF do not use these assets. Selecting or probing one of the four
 compressed output codecs downloads only that codec. A same-rate conversion
 loads no resampler; a rate change loads only the selected resampler quality.
 
@@ -123,24 +124,20 @@ public WASM files only; the engine does not upload user audio.
 
 ## Version and release order
 
-`@dsub/audio-transcoder-codecs` and `@dsub/audio-transcoder` are released in
-exact-version lockstep:
+`@dsub/audio-transcoder` and this `codec-assets/` tree are released together in
+one exact public GitHub tag:
 
 1. Let Release Please establish the engine version and changelog; do not create
    a manual tag or version edit.
-2. The Release workflow checks out that exact public tag and builds and verifies
-   this asset package.
-3. The workflow publishes `@dsub/audio-transcoder-codecs` first through npm
-   Trusted Publishing (OIDC), without a long-lived npm token.
-4. The workflow fetches every stable jsDelivr URL at that exact version and
-   verifies decoded raw size, SHA-256, ABI, schema, package metadata, and
-   required legal-file presence.
-5. The workflow publishes `@dsub/audio-transcoder` only after the assets are
-   proven available.
+2. The Release workflow verifies the manifest and all seven raw WASM files at
+   the exact jsDelivr GitHub path
+   `/gh/dsub-io/audio-transcoder@v<version>/codec-assets`.
+3. Only after those CDN bytes pass size, SHA-256, ABI, schema, and WebAssembly
+   validation does the workflow publish `@dsub/audio-transcoder` through npm
+   Trusted Publishing (OIDC).
 
-Root `npm publish` retains a fail-closed `prepublishOnly` check for steps 3 and
-4; never bypass it with `--ignore-scripts`. A workflow dispatch with an existing
-Release Please tag is recovery-only and runs the same exact-tag gates.
+There is no separate codec npm package, manual publish, recovery publish, or
+manual tag path. Release Please is the only owner of release versions and tags.
 
 See `THIRD_PARTY_NOTICES.md`, `THIRD_PARTY_LICENSES/`, and the pinned build and
 provenance material in the engine repository's `codec-build/` and `vendor/`

@@ -48,6 +48,14 @@ export interface JsDelivrRuntimeAssetSource {
   readonly packageVersion: string;
 }
 
+export interface JsDelivrGitHubRuntimeAssetSource {
+  readonly kind: 'jsdelivr-github';
+  readonly repository: string;
+  /** An exact Release Please tag such as `v1.2.3`. */
+  readonly tag: string;
+  readonly basePath: string;
+}
+
 export interface SelfHostedRuntimeAssetSource {
   readonly kind: 'self-hosted';
   readonly baseUrl: string;
@@ -55,6 +63,7 @@ export interface SelfHostedRuntimeAssetSource {
 
 export type RuntimeAssetSource =
   | JsDelivrRuntimeAssetSource
+  | JsDelivrGitHubRuntimeAssetSource
   | SelfHostedRuntimeAssetSource;
 
 export interface RuntimeAssetLoadState {
@@ -109,6 +118,8 @@ const EXACT_SEMVER =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const NPM_PACKAGE_NAME =
   /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
+const GITHUB_REPOSITORY =
+  /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
 
 export function createJsDelivrRuntimeAssetSource(
@@ -124,6 +135,28 @@ export function createJsDelivrRuntimeAssetSource(
     );
   }
   return Object.freeze({ kind: 'jsdelivr', packageName, packageVersion });
+}
+
+export function createJsDelivrGitHubRuntimeAssetSource(
+  repository: string,
+  tag: string,
+  basePath: string,
+): JsDelivrGitHubRuntimeAssetSource {
+  if (!GITHUB_REPOSITORY.test(repository)) {
+    throw configurationError(`Invalid GitHub repository: ${repository}`);
+  }
+  if (!tag.startsWith('v') || !EXACT_SEMVER.test(tag.slice(1))) {
+    throw configurationError(
+      `jsDelivr GitHub assets require an exact v<SemVer> tag, received: ${tag}`,
+    );
+  }
+  encodeAssetPath(basePath);
+  return Object.freeze({
+    basePath,
+    kind: 'jsdelivr-github',
+    repository,
+    tag,
+  });
 }
 
 export function createSelfHostedRuntimeAssetSource(
@@ -181,6 +214,14 @@ export function createRuntimeAssetProvider(
     ) {
       throw configurationError(
         `jsDelivr package version ${source.packageVersion} does not match manifest version ${options.manifest.version}.`,
+      );
+    }
+    if (
+      source.kind === 'jsdelivr-github' &&
+      source.tag !== `v${options.manifest.version}`
+    ) {
+      throw configurationError(
+        `jsDelivr GitHub tag ${source.tag} does not match manifest version ${options.manifest.version}.`,
       );
     }
   }
@@ -353,6 +394,8 @@ function resolveValidatedRuntimeAssetUrl(
   switch (source.kind) {
     case 'jsdelivr':
       return `https://cdn.jsdelivr.net/npm/${source.packageName}@${source.packageVersion}/${encodedPath}`;
+    case 'jsdelivr-github':
+      return `https://cdn.jsdelivr.net/gh/${source.repository}@${source.tag}/${encodeAssetPath(source.basePath)}/${encodedPath}`;
     case 'self-hosted':
       return `${source.baseUrl}/${encodedPath}`;
   }
@@ -589,6 +632,12 @@ function validateRuntimeAssetSource(
       return createJsDelivrRuntimeAssetSource(
         source.packageName,
         source.packageVersion,
+      );
+    case 'jsdelivr-github':
+      return createJsDelivrGitHubRuntimeAssetSource(
+        source.repository,
+        source.tag,
+        source.basePath,
       );
     case 'self-hosted':
       return createSelfHostedRuntimeAssetSource(source.baseUrl);

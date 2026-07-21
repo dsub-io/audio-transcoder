@@ -1,11 +1,12 @@
 import {
   GENERATED_CODEC_ASSET_MANIFEST,
-  GENERATED_CODEC_ASSET_PACKAGE,
+  GENERATED_CODEC_ASSET_BASE_PATH,
+  GENERATED_CODEC_ASSET_REPOSITORY,
 } from '../generated/codec-asset-metadata.js';
 import {
-  createJsDelivrRuntimeAssetSource,
+  createJsDelivrGitHubRuntimeAssetSource,
   createRuntimeAssetProvider,
-  type JsDelivrRuntimeAssetSource,
+  type JsDelivrGitHubRuntimeAssetSource,
   type RuntimeAssetFetch,
   type RuntimeAssetLoadState,
   type RuntimeAssetProvider,
@@ -13,8 +14,11 @@ import {
   type RuntimeAssetStateListener,
 } from './runtime-asset-provider.js';
 
-export const AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE =
-  GENERATED_CODEC_ASSET_PACKAGE;
+export const AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY =
+  GENERATED_CODEC_ASSET_REPOSITORY;
+
+export const AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH =
+  GENERATED_CODEC_ASSET_BASE_PATH;
 
 export const AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST =
   freezeCodecAssetManifest(GENERATED_CODEC_ASSET_MANIFEST);
@@ -57,10 +61,11 @@ export interface AudioTranscoderCodecAssetsConfiguration {
  * Applications still opt into it explicitly by passing the result to the
  * codec asset provider or Worker configuration.
  */
-export function createAudioTranscoderJsDelivrAssetSource(): JsDelivrRuntimeAssetSource {
-  return createJsDelivrRuntimeAssetSource(
-    AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE,
-    AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version,
+export function createAudioTranscoderJsDelivrAssetSource(): JsDelivrGitHubRuntimeAssetSource {
+  return createJsDelivrGitHubRuntimeAssetSource(
+    AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY,
+    `v${AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST.version}`,
+    AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH,
   );
 }
 

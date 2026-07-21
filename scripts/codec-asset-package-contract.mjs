@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
 
-export const CODEC_ASSET_PACKAGE_NAME = '@dsub/audio-transcoder-codecs';
+export const CODEC_ASSET_PACKAGE_NAME =
+  '@dsub/audio-transcoder-codec-assets-fixture';
 export const CODEC_ASSET_PACKAGE_DESCRIPTION =
-  'Version-locked raw WebAssembly codec assets for @dsub/audio-transcoder.';
+  'Private local fixture for version-locked @dsub/audio-transcoder WebAssembly assets.';
 export const CODEC_ASSET_PACKAGE_PUBLISH_BLOCK_MESSAGE =
-  'Development codec candidates are private; build the release from a clean Release Please tag with --release.';
+  'Codec asset fixtures are private and must not be published.';
 export const CODEC_ASSET_PACKAGE_PUBLISH_GUARD =
   `node -e "throw new Error('${CODEC_ASSET_PACKAGE_PUBLISH_BLOCK_MESSAGE}')"`;
 

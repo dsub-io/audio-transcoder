@@ -14,6 +14,12 @@ const verificationStartedAt = performance.now();
 
 const packageJsonUrl = new URL('../package.json', import.meta.url);
 const packageJson = JSON.parse(await readFile(packageJsonUrl, 'utf8'));
+const releasePleaseConfig = JSON.parse(
+  await readFile(
+    new URL('../release-please-config.json', import.meta.url),
+    'utf8',
+  ),
+);
 const releaseWorkflow = await readFile(
   new URL('../.github/workflows/release.yml', import.meta.url),
   'utf8',
@@ -98,6 +104,7 @@ const publicApi = await import('../dist/index.js');
 
 if (
   packageJson.author !== 'dsub.io' ||
+  codecAssetManifest.version !== packageJson.version ||
   packageJson.license !== 'SEE LICENSE IN LICENSE.md' ||
   !licenseText.startsWith(
     'Required Notice: Copyright 2026 dsub.io. All rights reserved.',
@@ -231,8 +238,6 @@ if (
 }
 
 const trustedPublishSteps = [
-  'pnpm codec-assets:release',
-  'npm publish ./.artifacts/codec-assets-package --access public',
   'node ./scripts/verify-published-codec-assets.mjs',
   'npm publish --access public',
 ];
@@ -248,20 +253,26 @@ const trustedPublishOrderIsValid = trustedPublishPositions.every(
 if (
   packageJson.scripts?.prepublishOnly !==
     'node ./scripts/verify-release-state.mjs && pnpm codec-assets:verify-published' ||
-  packageJson.scripts?.['codec-assets:release'] !==
-    'node ./scripts/build-codec-asset-package.mjs --release && node ./scripts/verify-codec-asset-package.mjs --release && npm pack --dry-run --json ./.artifacts/codec-assets-package' ||
   packageJson.scripts?.['codec-assets:verify-published'] !==
     'pnpm build && node ./scripts/verify-published-codec-assets.mjs' ||
   !releaseWorkflow.includes('id-token: write') ||
   !releaseWorkflow.includes('runs-on: ubuntu-latest') ||
   !releaseWorkflow.includes("needs.release-please.outputs.release_created == 'true'") ||
-  !releaseWorkflow.includes('inputs.tag || needs.release-please.outputs.tag_name') ||
+  !releaseWorkflow.includes('ref: ${{ needs.release-please.outputs.tag_name }}') ||
+  releaseWorkflow.includes('workflow_dispatch') ||
+  releaseWorkflow.includes('@dsub/audio-transcoder-codecs') ||
   releaseWorkflow.includes('NODE_AUTH_TOKEN') ||
   releaseWorkflow.includes('NPM_TOKEN') ||
+  !releasePleaseConfig.packages?.['.']?.['extra-files']?.some(
+    (entry) =>
+      entry?.type === 'json' &&
+      entry.path === 'codec-assets/manifest.json' &&
+      entry.jsonpath === '$.version',
+  ) ||
   !trustedPublishOrderIsValid
 ) {
   throw new Error(
-    'Release automation must publish the exact tag through npm OIDC in codec, jsDelivr verification, and engine order',
+    'Release automation must verify the exact GitHub-tag assets before publishing the engine through npm OIDC',
   );
 }
 
@@ -595,8 +606,9 @@ if (missingPackedEvidence !== undefined) {
 }
 
 if (
-  publicApi.AUDIO_TRANSCODER_CODEC_ASSET_PACKAGE !==
-    '@dsub/audio-transcoder-codecs' ||
+  publicApi.AUDIO_TRANSCODER_CODEC_ASSET_REPOSITORY !==
+    'dsub-io/audio-transcoder' ||
+  publicApi.AUDIO_TRANSCODER_CODEC_ASSET_BASE_PATH !== 'codec-assets' ||
   publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST?.version !==
     packageJson.version ||
   publicApi.AUDIO_TRANSCODER_CODEC_ASSET_MANIFEST?.schemaVersion !== 1 ||
@@ -617,9 +629,10 @@ if (
 
 const jsDelivrSource = publicApi.createAudioTranscoderJsDelivrAssetSource();
 if (
-  jsDelivrSource.kind !== 'jsdelivr' ||
-  jsDelivrSource.packageName !== '@dsub/audio-transcoder-codecs' ||
-  jsDelivrSource.packageVersion !== packageJson.version
+  jsDelivrSource.kind !== 'jsdelivr-github' ||
+  jsDelivrSource.repository !== 'dsub-io/audio-transcoder' ||
+  jsDelivrSource.tag !== `v${packageJson.version}` ||
+  jsDelivrSource.basePath !== 'codec-assets'
 ) {
   throw new Error('Built package exposed an unpinned jsDelivr asset source');
 }

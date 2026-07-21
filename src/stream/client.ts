@@ -33,6 +33,7 @@ import {
   probeAudioStreamOutputSupport,
 } from './output-support-probe.js';
 import {
+  createJsDelivrGitHubRuntimeAssetSource,
   createJsDelivrRuntimeAssetSource,
   createSelfHostedRuntimeAssetSource,
   RuntimeAssetError,
@@ -698,8 +699,11 @@ function snapshotRuntimeAssetSource(value: unknown): RuntimeAssetSource {
   const source = value as {
     readonly baseUrl?: unknown;
     readonly kind?: unknown;
+    readonly basePath?: unknown;
     readonly packageName?: unknown;
     readonly packageVersion?: unknown;
+    readonly repository?: unknown;
+    readonly tag?: unknown;
   };
   switch (source.kind) {
     case 'jsdelivr':
@@ -714,6 +718,21 @@ function snapshotRuntimeAssetSource(value: unknown): RuntimeAssetSource {
       return createJsDelivrRuntimeAssetSource(
         source.packageName,
         source.packageVersion,
+      );
+    case 'jsdelivr-github':
+      if (
+        typeof source.repository !== 'string' ||
+        typeof source.tag !== 'string' ||
+        typeof source.basePath !== 'string'
+      ) {
+        throw new Error(
+          'jsDelivr GitHub runtime asset source requires a repository, exact tag, and base path.',
+        );
+      }
+      return createJsDelivrGitHubRuntimeAssetSource(
+        source.repository,
+        source.tag,
+        source.basePath,
       );
     case 'self-hosted':
       if (typeof source.baseUrl !== 'string') {
