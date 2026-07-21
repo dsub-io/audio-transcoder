@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/dsub-io/audio-transcoder/compare/v0.1.0...v0.1.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* serve codec assets from release tags ([#13](https://github.com/dsub-io/audio-transcoder/issues/13)) ([0612f89](https://github.com/dsub-io/audio-transcoder/commit/0612f89844d100cab1c52f179727608a4b7c1cfe))
+
 ## [0.1.0](https://github.com/dsub-io/audio-transcoder/compare/v0.0.3...v0.1.0) (2026-07-21)
 
 
