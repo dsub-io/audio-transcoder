@@ -14,18 +14,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  NPM_VERSION: '>=11.5.1 <12'
-  PNPM_VERSION: 11.9.0
-
 jobs:
   release-please:
-    runs-on:
-      group: dsub-ci
-      labels: [self-hosted, linux, x64]
-    outputs:
-      release_created: ${{ steps.release.outputs.release_created }}
-      tag_name: ${{ steps.release.outputs.tag_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Verify release token
         env:
@@ -37,70 +29,8 @@ jobs:
           fi
 
       - id: release
-        uses: googleapis/release-please-action@v5
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5
         with:
           token: ${{ secrets.GH_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-
-  publish-npm:
-    needs: release-please
-    if: >-
-      needs.release-please.outputs.release_created == 'true' &&
-      vars.NPM_TRUSTED_PUBLISHING_ENABLED == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          clean: true
-          fetch-depth: 0
-          ref: ${{ needs.release-please.outputs.tag_name }}
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: ${{ env.PNPM_VERSION }}
-          run_install: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-          registry-url: https://registry.npmjs.org
-          package-manager-cache: false
-
-      - name: Set up npm for trusted publishing
-        run: |
-          npm install --global "npm@${NPM_VERSION}" --no-audit --no-fund
-          node_version="$(node --version)"
-          npm_version="$(npm --version)"
-          printf 'Node.js %s\nnpm %s\n' "${node_version}" "${npm_version}"
-          node - "${npm_version}" <<'NODE'
-          const match = /^(\d+)\.(\d+)\.(\d+)(?:-|$)/.exec(process.argv[2]);
-          if (match === null) {
-            throw new Error(`Unexpected npm version: ${process.argv[2]}`);
-          }
-          const [, major, minor, patch] = match.map(Number);
-          if (major !== 11 || minor < 5 || (minor === 5 && patch < 1)) {
-            throw new Error(`Trusted publishing requires npm 11.5.1 or newer within npm 11; received ${process.argv[2]}`);
-          }
-          NODE
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build package
-        run: pnpm build
-
-      - name: Verify release version
-        env:
-          RELEASE_TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: |
-          package_version="$(node -p "require('./package.json').version")"
-          test "${RELEASE_TAG}" = "v${package_version}"
-
-      - name: Publish package
-        run: npm publish
