@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.3.0](https://github.com/dsub-io/audio-transcoder/compare/v0.2.0...v0.3.0) (2026-07-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* memory-backed output sessions now reserve artifact and Blob materialization capacity when create() resolves. Concurrent callers should pass maxMemoryArtifactBytes per pending output.
+
+### Features
+
+* reserve browser output capacity safely ([5436515](https://github.com/dsub-io/audio-transcoder/commit/543651529af0d9758bed245d2ab1fdf60c65c412))
+
 ## [0.2.0](https://github.com/dsub-io/audio-transcoder/compare/v0.1.2...v0.2.0) (2026-07-21)
 
 
