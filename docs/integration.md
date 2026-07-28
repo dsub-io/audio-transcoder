@@ -432,6 +432,9 @@ async function transcodeOne(
           { presetId: 'mp3-192kbps', sampleRate: 48_000 },
           pending.stream,
           {
+            ...(pending.maxOutputBytes === undefined
+              ? {}
+              : { maxOutputBytes: pending.maxOutputBytes }),
             signal,
             onProgress: ({ phase, progress }) => {
               console.log(phase, progress);
@@ -444,12 +447,33 @@ async function transcodeOne(
           name: replaceExtension(file.name, result.preset.extension),
         });
       } catch (error) {
-        await pending.discard();
-        throw error;
+        return cleanupAndRethrowPrimary(
+          () => pending.discard(),
+          error,
+        );
       }
     },
     { signal },
   );
+}
+
+async function cleanupAndRethrowPrimary(
+  cleanup: () => Promise<void>,
+  primaryError: unknown,
+): Promise<never> {
+  try {
+    await cleanup();
+  } catch (cleanupError) {
+    try {
+      console.error(
+        'Output cleanup failed; output-session disposal will retry it.',
+        { cleanupError, primaryError },
+      );
+    } catch {
+      // Reporting must not replace the primary conversion or quota error.
+    }
+  }
+  throw primaryError;
 }
 
 function replaceExtension(name: string, extension: string): string {
@@ -458,6 +482,10 @@ function replaceExtension(name: string, extension: string): string {
   return `${stem}.${extension}`;
 }
 ```
+
+The helper keeps the conversion or quota error primary. A failed
+`pending.discard()` remains observable in the local console, while the pending
+resource stays tracked so `runtime.outputSession.dispose()` can retry removal.
 
 Pass the same `AbortSignal` to `schedule()`, `probeInputSupport()`, and
 `transcode()`. The pool is FIFO, creates Workers lazily, and releases idle
@@ -494,8 +522,11 @@ derive codec support or an automatic pool size from device hints alone.
 `createAudioTranscoderOutputSession()` returns an application-owned temporary
 storage boundary:
 
-- `session.create()` returns a tracked `pending` destination.
+- `session.create()` returns a tracked `pending` destination and derives a
+  memory fallback capacity from the session's current remaining budget.
 - Pass `pending.stream` directly to `transcode()`.
+- If `pending.maxOutputBytes` is present, pass it to `transcode()` in the same
+  operation options.
 - After successful stream closure, `pending.complete({ name, mimeType })`
   returns an artifact containing a `Blob` or `File` snapshot.
 - On failure or cancellation, `await pending.discard()` aborts and removes the
@@ -521,6 +552,62 @@ contents disappear. If OPFS cannot be opened, the session uses paged memory.
 completed memory outputs; Blob completion also reserves output-sized copy
 headroom. The default is 128 MiB. This package does not request persistent
 storage through `navigator.storage.persist()`.
+
+`pending.maxOutputBytes` is derived after the actual destination opens. It is
+absent for OPFS because browser quota can change outside the session. For a
+memory destination it is a stable, per-pending guarantee backed by an atomic
+session-budget lease that includes page rounding and Blob copy headroom. Pass
+the value to `transcode()` when present. WAV and AIFF full container sizes that
+are already known to exceed it fail during preparation, and a write-time guard
+covers compressed or otherwise unknown output sizes. Because a pending memory
+destination owns its lease until completion or discard, create outputs only
+after queue admission and settle each one promptly.
+
+Omitting `maxMemoryArtifactBytes` reserves the largest currently safe artifact
+capacity for that pending memory output. This is the correct default for a
+sequential batch that retains completed artifacts for download: each new
+pending output uses the budget remaining at that point.
+
+Only simultaneous pending memory outputs should request smaller explicit
+leases:
+
+```ts
+const firstPending = await runtime.outputSession.create({
+  maxMemoryArtifactBytes: 24 * 1024 * 1024,
+});
+const secondPending = await runtime.outputSession.create({
+  maxMemoryArtifactBytes: 24 * 1024 * 1024,
+});
+```
+
+Each capacity also needs page-rounded source storage and Blob materialization
+headroom within `memoryLimitBytes`. An unavailable request rejects before a
+destination is returned. OPFS destinations ignore the option and reserve no
+session memory.
+
+For user-facing classification, require both
+`error.code === 'RESOURCE_LIMIT_EXCEEDED'` and
+`error.reason === 'output-storage-limit'` before showing storage-capacity
+guidance. Use `error.code === 'UNSUPPORTED_OUTPUT'` with
+`error.reason === 'target-size-limit'` for RIFF, AIFF, Ogg, or another target
+representation limit. Both reasons survive the Worker boundary.
+
+Known `AudioTranscoderError` instances preserve `code`, optional `reason`, and
+`message`. Unknown Worker-origin `Error` values preserve `name`, `message`, and
+stack when available without an invented package classification. Arbitrary
+thrown values retain a diagnostic string where possible. Destination write or
+close failures prefer the original local thrown value over its Worker clone.
+
+### 0.3.0 memory lease migration
+
+Memory fallback allocation now occurs as an atomic page-plus-Blob lease during
+`session.create()`. Existing sequential code may keep `create()` without
+arguments, including while completed download artifacts remain retained. Its
+first pending output receives the largest safe capacity and can leave later
+concurrent pending outputs with zero capacity. Concurrent code should pass a
+smaller `maxMemoryArtifactBytes` per output and provision `memoryLimitBytes` for
+all leases. This behavioral change should ship as `0.3.0`; do not edit
+`package.json` manually because Release Please owns the version.
 
 Each OPFS session writes a lease and cleans managed orphan directories when the
 next session starts. [Web Locks](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API)

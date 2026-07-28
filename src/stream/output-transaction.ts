@@ -17,6 +17,8 @@ export interface AudioStreamOutputTransaction {
  */
 export function createAudioStreamOutputTransaction(
   output: AudioStreamOutput,
+  maxOutputBytes?: number,
+  maxRepresentableOutputBytes?: number,
 ): AudioStreamOutputTransaction {
   const writer = output.getWriter();
   let settlement: Promise<void> | null = null;
@@ -70,6 +72,37 @@ export function createAudioStreamOutputTransaction(
         throw new AudioTranscoderError(
           'INVALID_CONFIGURATION',
           'The streaming output transaction is already settled.',
+        );
+      }
+      const attemptedEnd = chunk.position + chunk.data.byteLength;
+      if (
+        maxRepresentableOutputBytes !== undefined &&
+        (!Number.isSafeInteger(attemptedEnd) ||
+          attemptedEnd > maxRepresentableOutputBytes)
+      ) {
+        throw new AudioTranscoderError(
+          'UNSUPPORTED_OUTPUT',
+          `Streaming output exceeds the target format's representable size (${maxRepresentableOutputBytes} bytes; attempted end: ${
+            Number.isSafeInteger(attemptedEnd)
+              ? `${attemptedEnd} bytes`
+              : 'an unsafe size'
+          }).`,
+          { reason: 'target-size-limit' },
+        );
+      }
+      if (
+        maxOutputBytes !== undefined &&
+        (!Number.isSafeInteger(attemptedEnd) ||
+          attemptedEnd > maxOutputBytes)
+      ) {
+        throw new AudioTranscoderError(
+          'RESOURCE_LIMIT_EXCEEDED',
+          `Streaming output exceeds maxOutputBytes (${maxOutputBytes} bytes; attempted end: ${
+            Number.isSafeInteger(attemptedEnd)
+              ? `${attemptedEnd} bytes`
+              : 'an unsafe size'
+          }).`,
+          { reason: 'output-storage-limit' },
         );
       }
       return writer.write(chunk);

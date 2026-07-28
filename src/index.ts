@@ -77,6 +77,8 @@ export type {
 } from './engine/contracts.js';
 export type {
   AudioTranscoderErrorCode,
+  AudioTranscoderErrorOptions,
+  AudioTranscoderErrorReason,
 } from './errors.js';
 export type {
   AudioTranscoderCodecAssetsConfiguration,
@@ -224,5 +226,6 @@ export type {
   AudioTranscoderOutputSession,
   AudioTranscoderOutputStorage,
   AudioTranscoderPendingOutput,
+  CreateAudioTranscoderPendingOutputOptions,
   CreateAudioTranscoderOutputSessionOptions,
 } from './stream/output-session.js';

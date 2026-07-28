@@ -1,5 +1,6 @@
 import {
   AUDIO_TRANSCODER_STREAM_CAPABILITIES,
+  AudioTranscoderError,
   createAudioTranscoderOutputSession,
   createSelfHostedRuntimeAssetSource,
   createAudioTranscoderStreamWorkerPool,
@@ -11,6 +12,7 @@ import {
   type AudioStreamTarget,
   type AudioTranscoderStreamWorkerEngine,
 } from '@dsub/audio-transcoder';
+import { discardPendingOutputAfterFailure } from '../../examples/vite/src/output-store.js';
 
 const MATRIX_FRAMES = 8_192;
 const INPUT_FIXTURE_FRAMES = 44_100;
@@ -240,6 +242,7 @@ interface OutputSessionSmokeResult {
   readonly bytesWritten: number;
   readonly channels: number;
   readonly createAfterDisposeCode: string;
+  readonly maximumArtifactBytes: number | null;
   readonly mimeType: string;
   readonly name: string;
   readonly namespaceEntriesAfterDispose: number | null;
@@ -254,20 +257,58 @@ interface OpfsAbortSmokeResult {
   readonly size: number;
 }
 
+interface DestinationFailureResult {
+  readonly code: string;
+  readonly message: string;
+  readonly name: string;
+  readonly reason: string | null;
+}
+
+interface OutputLimitPreflightResult extends DestinationFailureResult {
+  readonly writes: number;
+}
+
+interface WorkerErrorDiagnosticsResult {
+  readonly arbitrary: {
+    readonly message: string;
+    readonly name: string;
+    readonly stack: string | null;
+  };
+  readonly known: DestinationFailureResult;
+  readonly unknown: {
+    readonly hasCode: boolean;
+    readonly hasReason: boolean;
+    readonly message: string;
+    readonly name: string;
+    readonly stack: string | null;
+  };
+}
+
+interface DemoCleanupFailureResult {
+  readonly cleanupObserved: boolean;
+  readonly discardAttempts: number;
+  readonly primaryPreserved: boolean;
+  readonly retrySucceeded: boolean;
+}
+
 declare global {
   interface Window {
     runAacConstraintMatrix(): Promise<BrowserAacMatrixResult>;
     runAiffConstraintMatrix(): Promise<BrowserAiffMatrixResult>;
     runAudioStreamMatrix(): Promise<readonly BrowserMatrixResult[]>;
     runBoundedStreamStress(): Promise<BrowserStressResult>;
+    runDemoCleanupFailureRegression(): Promise<DemoCleanupFailureResult>;
+    runDestinationFailureRegression(): Promise<DestinationFailureResult>;
     runFlacConstraintMatrix(): Promise<BrowserFlacMatrixResult>;
     runFlacProbeBudgetRegression(): Promise<BrowserFlacProbeBudgetResult>;
     runInputProbeMatrix(): Promise<InputProbeMatrixResult>;
     runMp3ConstraintMatrix(): Promise<BrowserMp3ConstraintMatrixResult>;
     runOggOpusConstraintMatrix(): Promise<BrowserOggOpusMatrixResult>;
     runOpfsAbortSmoke(): Promise<OpfsAbortSmokeResult>;
+    runOutputLimitPreflight(): Promise<OutputLimitPreflightResult>;
     runOutputSupportProbe(): Promise<BrowserOutputSupportProbeResult>;
     runOutputSessionSmoke(): Promise<OutputSessionSmokeResult>;
+    runWorkerErrorDiagnostics(): Promise<WorkerErrorDiagnosticsResult>;
     runWavConstraintMatrix(): Promise<BrowserWavMatrixResult>;
     runSingleOutputPreset(
       presetId: AudioStreamOutputPresetId,
@@ -917,6 +958,180 @@ window.runBoundedStreamStress = async () => {
   }
 };
 
+window.runDestinationFailureRegression = async () => {
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+  });
+  const destinationError = new AudioTranscoderError(
+    'RESOURCE_LIMIT_EXCEEDED',
+    'browser destination quota exceeded',
+    { reason: 'output-storage-limit' },
+  );
+
+  try {
+    await engine.transcode(
+      cafInput(MATRIX_FRAMES),
+      {
+        channels: 1,
+        dither: 'none',
+        presetId: 'wav-pcm16',
+        sampleRate: SAMPLE_RATE,
+      },
+      new WritableStream<AudioStreamOutputChunk>({
+        write() {
+          throw destinationError;
+        },
+      }),
+      {
+        inputReadBytes: CHUNK_BYTES,
+        outputChunkBytes: CHUNK_BYTES,
+        pcmChunkBytes: CHUNK_BYTES,
+      },
+    );
+    return { code: 'NO_ERROR', message: '', name: '', reason: null };
+  } catch (error) {
+    return {
+      code: errorCode(error),
+      message: error instanceof Error ? error.message : String(error),
+      name: error instanceof Error ? error.name : typeof error,
+      reason: errorReason(error),
+    };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runOutputLimitPreflight = async () => {
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+  });
+  const sink = new SeekableMemorySink();
+
+  try {
+    await engine.transcode(
+      cafInput(MATRIX_FRAMES),
+      {
+        channels: 1,
+        dither: 'none',
+        presetId: 'wav-pcm24',
+        sampleRate: SAMPLE_RATE,
+      },
+      sink.stream,
+      {
+        maxOutputBytes: 1,
+        outputChunkBytes: CHUNK_BYTES,
+      },
+    );
+    return {
+      code: 'NO_ERROR',
+      message: '',
+      name: '',
+      reason: null,
+      writes: sink.writes,
+    };
+  } catch (error) {
+    return {
+      code: errorCode(error),
+      message: error instanceof Error ? error.message : String(error),
+      name: error instanceof Error ? error.name : typeof error,
+      reason: errorReason(error),
+      writes: sink.writes,
+    };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runWorkerErrorDiagnostics = async () => {
+  const engine = createAudioTranscoderStreamWorkerEngine({
+    codecAssets: BROWSER_CODEC_ASSETS,
+    workerFactory: () =>
+      new Worker(new URL('./diagnostic-worker.ts', import.meta.url), {
+        type: 'module',
+      }),
+  });
+
+  try {
+    const known = await captureWorkerDiagnostic(engine, 'known');
+    const unknown = await captureWorkerDiagnostic(engine, 'unknown');
+    const arbitrary = await captureWorkerDiagnostic(engine, 'arbitrary');
+
+    return {
+      arbitrary: {
+        message: arbitrary.message,
+        name: arbitrary.name,
+        stack: arbitrary.stack ?? null,
+      },
+      known: {
+        code: errorCode(known),
+        message: known.message,
+        name: known.name,
+        reason: errorReason(known),
+      },
+      unknown: {
+        hasCode: 'code' in unknown,
+        hasReason: 'reason' in unknown,
+        message: unknown.message,
+        name: unknown.name,
+        stack: unknown.stack ?? null,
+      },
+    };
+  } finally {
+    await engine.dispose();
+  }
+};
+
+window.runDemoCleanupFailureRegression = async () => {
+  const primaryError = new Error('transcode failed');
+  const cleanupError = new Error('OPFS removal failed');
+  const originalConsoleError = console.error;
+  let cleanupObserved = false;
+  let discardAttempts = 0;
+  let handledError: unknown;
+  let retrySucceeded = false;
+  const pending = {
+    async discard() {
+      discardAttempts += 1;
+      if (discardAttempts === 1) {
+        throw cleanupError;
+      }
+    },
+  } as unknown as NonNullable<
+    Parameters<typeof discardPendingOutputAfterFailure>[0]
+  >;
+
+  console.error = (message?: unknown, details?: unknown): void => {
+    cleanupObserved =
+      message ===
+        'Output cleanup failed; output-session disposal will retry it.' &&
+      details !== null &&
+      typeof details === 'object' &&
+      'cleanupError' in details &&
+      details.cleanupError === cleanupError &&
+      'primaryError' in details &&
+      details.primaryError === primaryError;
+  };
+  try {
+    try {
+      throw primaryError;
+    } catch (error) {
+      await discardPendingOutputAfterFailure(pending, error);
+      handledError = error;
+    }
+    await pending.discard();
+    retrySucceeded = true;
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  return {
+    cleanupObserved,
+    discardAttempts,
+    primaryPreserved: handledError === primaryError,
+    retrySucceeded,
+  };
+};
+
 window.runOutputSessionSmoke = async () => {
   const namespace = `matrix-${crypto.randomUUID()}`;
   const session = createAudioTranscoderOutputSession({
@@ -934,7 +1149,10 @@ window.runOutputSessionSmoke = async () => {
 
   try {
     const storage = await session.getStorageMode();
-    pending = await session.create();
+    pending = await session.create({
+      maxMemoryArtifactBytes: 1024 * 1024,
+    });
+    const maximumArtifactBytes = pending.maxOutputBytes ?? null;
     const result = await engine.transcode(
       cafInput(MATRIX_FRAMES),
       {
@@ -944,7 +1162,12 @@ window.runOutputSessionSmoke = async () => {
         sampleRate: SAMPLE_RATE,
       },
       pending.stream,
-      { outputChunkBytes: CHUNK_BYTES },
+      {
+        ...(maximumArtifactBytes === null
+          ? {}
+          : { maxOutputBytes: maximumArtifactBytes }),
+        outputChunkBytes: CHUNK_BYTES,
+      },
     );
 
     await engine.dispose();
@@ -982,6 +1205,7 @@ window.runOutputSessionSmoke = async () => {
       bytesWritten: result.bytesWritten,
       channels: header.channels,
       createAfterDisposeCode,
+      maximumArtifactBytes,
       mimeType,
       name,
       namespaceEntriesAfterDispose:
@@ -2159,6 +2383,24 @@ function dataView(bytes: Uint8Array): DataView {
   return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 }
 
+async function captureWorkerDiagnostic(
+  engine: AudioTranscoderStreamWorkerEngine,
+  name: 'arbitrary' | 'known' | 'unknown',
+): Promise<Error> {
+  try {
+    await engine.inspect({
+      blob: new Blob(['diagnostic']),
+      name,
+    });
+  } catch (error) {
+    if (error instanceof Error) {
+      return error;
+    }
+    throw new Error(`Worker rejected with a non-Error value: ${String(error)}`);
+  }
+  throw new Error(`Worker diagnostic "${name}" unexpectedly succeeded.`);
+}
+
 function errorCode(error: unknown): string {
   return error !== null &&
     typeof error === 'object' &&
@@ -2166,6 +2408,15 @@ function errorCode(error: unknown): string {
     typeof error.code === 'string'
     ? error.code
     : 'UNKNOWN_ERROR';
+}
+
+function errorReason(error: unknown): string | null {
+  return typeof error === 'object' &&
+    error !== null &&
+    'reason' in error &&
+    typeof error.reason === 'string'
+    ? error.reason
+    : null;
 }
 
 async function countNamespaceEntries(namespace: string): Promise<number> {

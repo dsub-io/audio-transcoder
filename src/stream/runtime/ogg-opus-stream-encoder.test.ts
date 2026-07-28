@@ -114,6 +114,27 @@ describe('bundled Ogg Opus stream encoder', () => {
     expect(destination.stream.locked).toBe(false);
   });
 
+  it('classifies an unsafe Ogg frame count as a target limit', async () => {
+    const destination = createDestination();
+    const encoder = await createOggOpusStreamEncoder(
+      createConfiguration({
+        channels: 1,
+        writable: destination.stream,
+      }),
+      64_000,
+    );
+    await encoder.start();
+    const oversized = {
+      length: Number.MAX_SAFE_INTEGER + 1,
+    } as unknown as Float32Array;
+
+    await expect(encoder.write(oversized, 0)).rejects.toMatchObject({
+      code: 'UNSUPPORTED_OUTPUT',
+      reason: 'target-size-limit',
+    });
+    await encoder.cancel();
+  });
+
   it('creates an encoder factory from an explicit raw-WASM loader', async () => {
     const { wasm, destroy } = createFakeWasm();
     const module = await importEncoderWithWasm(wasm);
@@ -486,7 +507,8 @@ describe('bundled Ogg Opus stream encoder failures', () => {
       .mockReturnValueOnce(false);
 
     await expect(encoder.write(new Float32Array(2), 0)).rejects.toMatchObject({
-      code: 'RESOURCE_LIMIT_EXCEEDED',
+      code: 'UNSUPPORTED_OUTPUT',
+      reason: 'target-size-limit',
     });
     expect(fake.write).not.toHaveBeenCalled();
     await encoder.cancel();

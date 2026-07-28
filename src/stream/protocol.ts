@@ -69,7 +69,7 @@ export type AudioStreamWorkerRequest =
 
 export type StreamWorkerOperationOptions = Pick<
   AudioStreamOperationOptions,
-  'inputReadBytes' | 'outputChunkBytes' | 'pcmChunkBytes'
+  'inputReadBytes' | 'maxOutputBytes' | 'outputChunkBytes' | 'pcmChunkBytes'
 >;
 
 export type AudioStreamWorkerResponse =

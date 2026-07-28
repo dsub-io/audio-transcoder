@@ -25,7 +25,10 @@ import {
 } from '../engine/operation-errors.js';
 import { AudioTranscoderError } from '../errors.js';
 import { packageEngineInfo } from '../package-metadata.js';
-import { deserializeWorkerError } from '../worker/serialized-error.js';
+import {
+  deserializeWorkerError,
+  serializeWorkerError,
+} from '../worker/serialized-error.js';
 import { AUDIO_TRANSCODER_STREAM_CAPABILITIES } from './capabilities.js';
 import type { AudioTranscoderStreamCapabilities } from './capabilities.js';
 import {
@@ -69,14 +72,25 @@ interface QueuedOperation {
   readonly transfer: Transferable[];
 }
 
-interface OutputBridgeSettlement {
+type OutputBridgeFailureOrigin =
+  | 'client-abort'
+  | 'destination-close'
+  | 'destination-write'
+  | 'transferred-stream-abort';
+
+interface OutputBridgeFailure {
+  readonly origin: OutputBridgeFailureOrigin;
   readonly reason: unknown;
-  readonly status: 'closed' | 'failed';
+  readonly status: 'failed';
 }
 
+type OutputBridgeSettlement =
+  | OutputBridgeFailure
+  | { readonly reason: undefined; readonly status: 'closed' };
+
 type OutputBridgeReadiness =
-  | { readonly status: 'ready' }
-  | { readonly reason: unknown; readonly status: 'failed' };
+  | OutputBridgeFailure
+  | { readonly status: 'ready' };
 
 interface OutputBridge {
   abort(reason: unknown): Promise<void>;
@@ -254,11 +268,11 @@ export function createAudioTranscoderStreamWorkerEngine(
             response.type === 'error'
               ? deserializeWorkerError(response.error)
               : undefined;
+          let outputSettlement: OutputBridgeSettlement | undefined;
           if (response.type === 'error') {
             await waitForOutputBridgeAbort(operation, operationError);
-          }
-          let outputSettlement: OutputBridgeSettlement | undefined;
-          if (response.type === 'result' && operation.outputBridge !== undefined) {
+            outputSettlement = await operation.outputBridge?.completion;
+          } else if (operation.outputBridge !== undefined) {
             const readiness = await operation.outputBridge.ready;
             if (active !== operation) {
               return;
@@ -280,7 +294,9 @@ export function createAudioTranscoderStreamWorkerEngine(
           detachAbort(operation);
           active = undefined;
           if (response.type === 'error') {
-            operation.reject(operationError);
+            operation.reject(
+              selectWorkerOperationError(operationError!, outputSettlement),
+            );
           } else if (outputSettlement?.status === 'failed') {
             operation.reject(outputSettlement.reason);
           } else {
@@ -769,6 +785,42 @@ async function waitForOutputBridgeAbort(
   }
 }
 
+function selectWorkerOperationError(
+  workerError: Error,
+  outputSettlement: OutputBridgeSettlement | undefined,
+): unknown {
+  if (
+    outputSettlement?.status === 'failed' &&
+    isDestinationFailure(outputSettlement.origin) &&
+    isStructuredCloneOf(workerError, outputSettlement.reason)
+  ) {
+    return outputSettlement.reason;
+  }
+  return workerError;
+}
+
+function isDestinationFailure(origin: OutputBridgeFailureOrigin): boolean {
+  return origin === 'destination-close' || origin === 'destination-write';
+}
+
+function isStructuredCloneOf(workerError: Error, localReason: unknown): boolean {
+  const serializedLocal = serializeWorkerError(localReason);
+  if (serializedLocal.message !== workerError.message) {
+    return false;
+  }
+  if (workerError instanceof AudioTranscoderError) {
+    return (
+      localReason instanceof AudioTranscoderError &&
+      serializedLocal.code === workerError.code &&
+      serializedLocal.reason === workerError.reason
+    );
+  }
+  return (
+    serializedLocal.name === workerError.name ||
+    localReason instanceof AudioTranscoderError
+  );
+}
+
 function resolveMaxQueued(
   value: number | undefined,
   capabilities: typeof AUDIO_TRANSCODER_STREAM_CAPABILITIES | {
@@ -829,23 +881,36 @@ function createOutputBridge(output: AudioStreamOutput): OutputBridge {
     writer.releaseLock();
     resolveCompletion(settlement);
   };
-  const fail = (reason: unknown): void => {
-    const failure = { reason, status: 'failed' } as const;
+  const fail = (
+    reason: unknown,
+    origin: OutputBridgeFailureOrigin,
+  ): void => {
+    const failure = { origin, reason, status: 'failed' } as const;
     setReadiness(failure);
     settle(failure);
   };
-  const abortOnce = (reason: unknown): Promise<void> => {
+  const abortOnce = (
+    reason: unknown,
+    origin: Extract<
+      OutputBridgeFailureOrigin,
+      'client-abort' | 'transferred-stream-abort'
+    >,
+  ): Promise<void> => {
     if (settled) {
       return Promise.resolve();
     }
     const aborting = writer.abort(reason);
     // Releasing ownership does not need to wait for a non-cooperative sink's
     // abort hook. Disposal still tracks the hook's eventual settlement.
-    fail(reason);
+    fail(reason, origin);
     return aborting;
   };
   const abort = (reason: unknown): Promise<void> => {
-    abortPromise ??= abortOnce(reason);
+    abortPromise ??= abortOnce(reason, 'client-abort');
+    return abortPromise;
+  };
+  const abortTransferredStream = (reason: unknown): Promise<void> => {
+    abortPromise ??= abortOnce(reason, 'transferred-stream-abort');
     return abortPromise;
   };
   const commit = (): Promise<OutputBridgeSettlement> => {
@@ -856,14 +921,14 @@ function createOutputBridge(output: AudioStreamOutput): OutputBridge {
         return completion;
       },
       (error: unknown) => {
-        fail(error);
+        fail(error, 'destination-close');
         return completion;
       },
     );
   };
 
   const stream = new WritableStream<AudioStreamOutputChunk>({
-    abort,
+    abort: abortTransferredStream,
     close() {
       setReadiness({ status: 'ready' });
     },
@@ -871,7 +936,7 @@ function createOutputBridge(output: AudioStreamOutput): OutputBridge {
       try {
         await writer.write(chunk);
       } catch (error) {
-        fail(error);
+        fail(error, 'destination-write');
         throw error;
       }
     },
@@ -913,6 +978,9 @@ function workerOptions(
     ...(options.inputReadBytes === undefined
       ? {}
       : { inputReadBytes: options.inputReadBytes }),
+    ...(options.maxOutputBytes === undefined
+      ? {}
+      : { maxOutputBytes: options.maxOutputBytes }),
     ...(options.outputChunkBytes === undefined
       ? {}
       : { outputChunkBytes: options.outputChunkBytes }),

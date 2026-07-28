@@ -131,6 +131,7 @@ describe('stream worker host', () => {
       input: { blob: new Blob(['audio']) },
       options: {
         inputReadBytes: 65_536,
+        maxOutputBytes: 524_288,
         outputChunkBytes: 131_072,
         pcmChunkBytes: 262_144,
       },
@@ -146,6 +147,7 @@ describe('stream worker host', () => {
       output,
       expect.objectContaining({
         inputReadBytes: 65_536,
+        maxOutputBytes: 524_288,
         outputChunkBytes: 131_072,
         pcmChunkBytes: 262_144,
         signal: expect.any(AbortSignal),
@@ -274,9 +276,16 @@ describe('stream worker host', () => {
   });
 
   it.each([
-    [new TypeError('typed failure'), { message: 'typed failure', name: 'TypeError' }],
+    [
+      new TypeError('typed failure'),
+      {
+        message: 'typed failure',
+        name: 'TypeError',
+        stack: expect.any(String),
+      },
+    ],
     ['string failure', { message: 'string failure', name: 'Error' }],
-    [42, { message: 'Unknown worker failure.', name: 'Error' }],
+    [42, { message: '42', name: 'Error' }],
   ])('serializes operation failures %#', async (failure, serialized) => {
     const postMessage = vi.fn();
     const handle = createStreamWorkerMessageHandler({

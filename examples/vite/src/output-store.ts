@@ -20,10 +20,24 @@ export interface OutputArtifact {
 }
 
 export interface PendingOutput {
+  readonly maxOutputBytes?: number;
   readonly storage: OutputStorageMode;
   readonly stream: AudioStreamOutput;
   complete(downloadName: string, mimeType: string): Promise<OutputArtifact>;
   discard(): Promise<void>;
+}
+
+export async function discardPendingOutputAfterFailure(
+  pending: PendingOutput | undefined,
+  primaryError: unknown,
+): Promise<void> {
+  if (pending === undefined) {
+    return;
+  }
+  await observeCleanupFailure(
+    () => pending.discard(),
+    primaryError,
+  );
 }
 
 export class OutputStore {
@@ -35,6 +49,9 @@ export class OutputStore {
   async create(): Promise<PendingOutput> {
     const pending = await this.session.create();
     return {
+      ...(pending.maxOutputBytes === undefined
+        ? {}
+        : { maxOutputBytes: pending.maxOutputBytes }),
       storage: pending.storage,
       stream: pending.stream,
       complete: async (downloadName, mimeType) =>
@@ -61,7 +78,7 @@ async function createDownloadArtifact(
   try {
     url = URL.createObjectURL(artifact.blob);
   } catch (error) {
-    await artifact.dispose().catch(() => undefined);
+    await observeCleanupFailure(() => artifact.dispose(), error);
     throw error;
   }
 
@@ -96,4 +113,22 @@ async function createDownloadArtifact(
       return attempt;
     },
   };
+}
+
+async function observeCleanupFailure(
+  cleanup: () => Promise<void>,
+  primaryError: unknown,
+): Promise<void> {
+  try {
+    await cleanup();
+  } catch (cleanupError) {
+    try {
+      console.error(
+        'Output cleanup failed; output-session disposal will retry it.',
+        { cleanupError, primaryError },
+      );
+    } catch {
+      // Cleanup reporting must not replace the primary operation error.
+    }
+  }
 }

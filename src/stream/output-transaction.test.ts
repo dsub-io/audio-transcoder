@@ -113,6 +113,73 @@ describe('stream output transaction', () => {
     await expect(transaction.commit()).rejects.toBe(failure);
     expect(output.locked).toBe(false);
   });
+
+  it.each([
+    [
+      { ...CHUNK, data: new Uint8Array([1, 2]), position: 4 },
+      '6 bytes',
+    ],
+    [
+      {
+        ...CHUNK,
+        data: new Uint8Array([1]),
+        position: Number.MAX_SAFE_INTEGER,
+      },
+      'an unsafe size',
+    ],
+  ])('rejects an output write beyond maxOutputBytes', async (chunk, attemptedEnd) => {
+    const write = vi.fn();
+    const output = new WritableStream<AudioStreamOutputChunk>({ write });
+    const transaction = createAudioStreamOutputTransaction(output, 5);
+    const writer = transaction.stream.getWriter();
+
+    await expect(writer.write(chunk)).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      message: `Streaming output exceeds maxOutputBytes (5 bytes; attempted end: ${attemptedEnd}).`,
+      reason: 'output-storage-limit',
+    });
+    expect(write).not.toHaveBeenCalled();
+
+    writer.releaseLock();
+    await transaction.abort(new Error('limit exceeded'));
+  });
+
+  it.each([
+    [
+      { ...CHUNK, data: new Uint8Array([1, 2]), position: 4 },
+      '6 bytes',
+    ],
+    [
+      {
+        ...CHUNK,
+        data: new Uint8Array([1]),
+        position: Number.MAX_SAFE_INTEGER,
+      },
+      'an unsafe size',
+    ],
+  ])(
+    'rejects an output write beyond the target format size',
+    async (chunk, attemptedEnd) => {
+      const write = vi.fn();
+      const output = new WritableStream<AudioStreamOutputChunk>({ write });
+      const transaction = createAudioStreamOutputTransaction(
+        output,
+        undefined,
+        5,
+      );
+      const writer = transaction.stream.getWriter();
+
+      await expect(writer.write(chunk)).rejects.toMatchObject({
+        code: 'UNSUPPORTED_OUTPUT',
+        message: `Streaming output exceeds the target format's representable size (5 bytes; attempted end: ${attemptedEnd}).`,
+        reason: 'target-size-limit',
+      });
+      expect(write).not.toHaveBeenCalled();
+
+      writer.releaseLock();
+      await transaction.abort(new Error('target limit exceeded'));
+    },
+  );
 });
 
 function deferred<T>(): {

@@ -147,9 +147,16 @@ describe('audio worker host', () => {
   });
 
   it.each([
-    [new TypeError('typed failure'), { message: 'typed failure', name: 'TypeError' }],
+    [
+      new TypeError('typed failure'),
+      {
+        message: 'typed failure',
+        name: 'TypeError',
+        stack: expect.any(String),
+      },
+    ],
     ['string failure', { message: 'string failure', name: 'Error' }],
-    [42, { message: 'Unknown worker failure.', name: 'Error' }],
+    [42, { message: '42', name: 'Error' }],
   ])('serializes non-engine failures %#', async (failure, serialized) => {
     const engine = createEngine({
       async decode(): Promise<DecodedAudio> {

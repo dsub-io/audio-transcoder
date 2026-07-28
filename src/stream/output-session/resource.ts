@@ -22,6 +22,7 @@ export class ManagedPendingOutput implements AudioTranscoderPendingOutput {
   private disposeRequested = false;
   private released = false;
 
+  readonly maxOutputBytes?: number;
   readonly storage: AudioTranscoderOutputStorage;
   readonly stream: AudioStreamOutput;
 
@@ -29,6 +30,9 @@ export class ManagedPendingOutput implements AudioTranscoderPendingOutput {
     private readonly destination: OutputDestination,
     private readonly release: () => void,
   ) {
+    if (destination.maxOutputBytes !== undefined) {
+      this.maxOutputBytes = destination.maxOutputBytes;
+    }
     this.storage = destination.storage;
     this.stream = destination.stream;
   }

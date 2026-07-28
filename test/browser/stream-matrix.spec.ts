@@ -716,9 +716,89 @@ test('uses an OPFS or bounded-memory output session and cleans it up', async ({
   expect(result.name).toBe('session-output.wav');
   expect(result.mimeType).toBe('audio/wav');
   expect(result.createAfterDisposeCode).toBe('INVALID_CONFIGURATION');
+  expect(result.maximumArtifactBytes).toBe(
+    result.storage === 'memory' ? 1024 * 1024 : null,
+  );
   expect(result.namespaceEntriesAfterDispose).toBe(
     result.storage === 'opfs' ? 0 : null,
   );
+});
+
+test('preserves destination errors across a transferred stream', async ({
+  page,
+}) => {
+  await page.goto('/test/browser/');
+
+  await expect(
+    page.evaluate(() => window.runDestinationFailureRegression()),
+  ).resolves.toEqual({
+    code: 'RESOURCE_LIMIT_EXCEEDED',
+    message: 'browser destination quota exceeded',
+    name: 'AudioTranscoderError',
+    reason: 'output-storage-limit',
+  });
+});
+
+test('keeps the Vite demo primary error while cleanup remains observable and retriable', async ({
+  page,
+}) => {
+  await page.goto('/test/browser/');
+
+  await expect(
+    page.evaluate(() => window.runDemoCleanupFailureRegression()),
+  ).resolves.toEqual({
+    cleanupObserved: true,
+    discardAttempts: 2,
+    primaryPreserved: true,
+    retrySucceeded: true,
+  });
+});
+
+test('rejects a known oversized output before its first write', async ({
+  page,
+}) => {
+  await page.goto('/test/browser/');
+
+  await expect(
+    page.evaluate(() => window.runOutputLimitPreflight()),
+  ).resolves.toEqual({
+    code: 'RESOURCE_LIMIT_EXCEEDED',
+    message: expect.stringContaining(
+      'Predicted uncompressed audio output exceeds maxOutputBytes',
+    ),
+    name: 'AudioTranscoderError',
+    reason: 'output-storage-limit',
+    writes: 0,
+  });
+});
+
+test('preserves classified and fallback Worker error diagnostics', async ({
+  page,
+}) => {
+  await page.goto('/test/browser/');
+
+  await expect(
+    page.evaluate(() => window.runWorkerErrorDiagnostics()),
+  ).resolves.toEqual({
+    arbitrary: {
+      message: 'plain thrown diagnostic',
+      name: 'CodecDiagnostic',
+      stack: 'codec-diagnostic-stack',
+    },
+    known: {
+      code: 'UNSUPPORTED_OUTPUT',
+      message: 'RIFF cannot represent this output',
+      name: 'AudioTranscoderError',
+      reason: 'target-size-limit',
+    },
+    unknown: {
+      hasCode: false,
+      hasReason: false,
+      message: 'codec bridge exploded',
+      name: 'TypeError',
+      stack: 'TypeError: codec bridge exploded\n    at worker-codec.js:4:2',
+    },
+  });
 });
 
 test('keeps a long conversion within configured chunk bounds', async ({ page }) => {

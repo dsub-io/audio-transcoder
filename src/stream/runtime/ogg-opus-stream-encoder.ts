@@ -248,8 +248,9 @@ function createEncoderFactory(
         const frameCount = samples.length / configuration.channels;
         if (!Number.isSafeInteger(framesWritten + frameCount)) {
           throw new AudioTranscoderError(
-            'RESOURCE_LIMIT_EXCEEDED',
+            'UNSUPPORTED_OUTPUT',
             'Ogg Opus output exceeds the safe JavaScript frame-count limit.',
+            { reason: 'target-size-limit' },
           );
         }
         activeWrite = true;
