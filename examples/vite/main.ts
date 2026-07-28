@@ -15,6 +15,7 @@ import {
   type WavContainerMode,
 } from '@dsub/audio-transcoder';
 import {
+  discardPendingOutputAfterFailure,
   OutputStore,
   type OutputArtifact,
   type PendingOutput,
@@ -31,8 +32,11 @@ type RowStatus =
   | 'ready';
 
 interface RowError {
-  readonly code: string;
+  readonly code?: string;
   readonly message: string;
+  readonly name?: string;
+  readonly reason?: string;
+  readonly stack?: string;
 }
 
 interface RowState {
@@ -720,6 +724,9 @@ async function convertRow(job: ConversionJob): Promise<void> {
       job.target,
       pendingOutput.stream,
       {
+        ...(pendingOutput.maxOutputBytes === undefined
+          ? {}
+          : { maxOutputBytes: pendingOutput.maxOutputBytes }),
         onProgress: (progress) => scheduleProgress(job.id, progress),
         signal: controller.signal,
       },
@@ -741,7 +748,7 @@ async function convertRow(job: ConversionJob): Promise<void> {
       }));
     }
   } catch (error) {
-    await pendingOutput?.discard();
+    await discardPendingOutputAfterFailure(pendingOutput, error);
     if (findRow(job.id) !== undefined) {
       replaceRow(job.id, (current) => ({
         ...current,
@@ -1004,7 +1011,7 @@ function statusPresentation(row: RowState): {
         detail:
           row.error === undefined
             ? 'Conversion failed'
-            : `${row.error.code}: ${row.error.message}`,
+            : formatRowError(row.error),
         label: 'Error',
       };
   }
@@ -1914,26 +1921,56 @@ function createFloat32CafTone(): File {
 
 function describeError(error: unknown): RowError {
   if (error instanceof AudioTranscoderError) {
-    return { code: error.code, message: error.message };
+    return {
+      code: error.code,
+      message: error.message,
+      name: error.name,
+      ...(error.reason === undefined ? {} : { reason: error.reason }),
+      ...(error.stack === undefined ? {} : { stack: error.stack }),
+    };
   }
   if (
     typeof error === 'object' &&
-    error !== null &&
-    'code' in error &&
-    typeof error.code === 'string'
+    error !== null
   ) {
+    const code =
+      'code' in error && typeof error.code === 'string'
+        ? error.code
+        : undefined;
+    const message =
+      'message' in error && typeof error.message === 'string'
+        ? error.message
+        : String(error);
+    const name =
+      'name' in error && typeof error.name === 'string'
+        ? error.name
+        : undefined;
+    const reason =
+      'reason' in error && typeof error.reason === 'string'
+        ? error.reason
+        : undefined;
+    const stack =
+      'stack' in error && typeof error.stack === 'string'
+        ? error.stack
+        : undefined;
     return {
-      code: error.code,
-      message:
-        'message' in error && typeof error.message === 'string'
-          ? error.message
-          : 'Audio processing failed.',
+      ...(code === undefined ? {} : { code }),
+      message,
+      ...(name === undefined ? {} : { name }),
+      ...(reason === undefined ? {} : { reason }),
+      ...(stack === undefined ? {} : { stack }),
     };
   }
   return {
-    code: 'UNKNOWN_ERROR',
-    message: error instanceof Error ? error.message : String(error),
+    message: String(error),
   };
+}
+
+function formatRowError(error: RowError): string {
+  const classification = error.code ?? error.name;
+  return classification === undefined
+    ? error.message
+    : `${classification}: ${error.message}`;
 }
 
 function isAbortError(error: unknown): boolean {

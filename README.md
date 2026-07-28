@@ -80,15 +80,22 @@ async function transcodeFile(
           input,
           target,
           pending.stream,
-          { signal },
+          {
+            ...(pending.maxOutputBytes === undefined
+              ? {}
+              : { maxOutputBytes: pending.maxOutputBytes }),
+            signal,
+          },
         );
         return await pending.complete({
           mimeType: result.preset.mimeType,
           name: replaceExtension(file.name, result.preset.extension),
         });
       } catch (error) {
-        await pending.discard();
-        throw error;
+        return cleanupAndRethrowPrimary(
+          () => pending.discard(),
+          error,
+        );
       }
     },
     { signal },
@@ -104,8 +111,10 @@ async function offerDownload(
   try {
     url = URL.createObjectURL(artifact.blob);
   } catch (error) {
-    await artifact.dispose();
-    throw error;
+    return cleanupAndRethrowPrimary(
+      () => artifact.dispose(),
+      error,
+    );
   }
 
   const link = document.createElement('a');
@@ -121,6 +130,25 @@ async function offerDownload(
   };
 }
 
+async function cleanupAndRethrowPrimary(
+  cleanup: () => Promise<void>,
+  primaryError: unknown,
+): Promise<never> {
+  try {
+    await cleanup();
+  } catch (cleanupError) {
+    try {
+      console.error(
+        'Output cleanup failed; output-session disposal will retry it.',
+        { cleanupError, primaryError },
+      );
+    } catch {
+      // Reporting must not replace the primary conversion or quota error.
+    }
+  }
+  throw primaryError;
+}
+
 function replaceExtension(name: string, extension: string): string {
   const dot = name.lastIndexOf('.');
   return `${dot > 0 ? name.slice(0, dot) : name}.${extension}`;
@@ -132,6 +160,10 @@ async function disposeAudioTool(): Promise<void> {
   await outputSession.dispose();
 }
 ```
+
+If eager cleanup fails, the original conversion, quota, or URL error remains
+the rejection. The cleanup error is reported locally, and the output session
+keeps the resource tracked so its later `dispose()` can retry removal.
 
 Pass a `File` from a file input or drop event to `offerDownload()`. Revoke the
 object URL and dispose its artifact when removing the link; then await
@@ -362,6 +394,62 @@ readable only until `artifact.dispose()` starts. The memory fallback's
 URL from that Blob adds no application-level copy. Revoke the URL before
 awaiting artifact disposal. Failed cleanup remains session-tracked and is
 retried by `outputSession.dispose()`.
+
+Create the destination first, then pass `pending.maxOutputBytes` to
+`transcode()` when it is present. The value belongs to the actual destination:
+OPFS omits it because browser quota is not stable, while a memory destination
+atomically leases enough session budget for its paged source and Blob
+materialization. This prevents concurrent pending outputs from promising the
+same capacity. Pass `maxMemoryArtifactBytes` to `session.create()` when
+concurrent memory-backed outputs need separate nonzero capacities. Omitting it
+reserves the largest capacity currently safe for that one pending output.
+Known WAV and AIFF container sizes that cannot fit reject during preparation;
+every format is also checked while writing. Settle each pending output promptly.
+
+For example, only callers that intentionally keep multiple pending outputs open
+at once should split the memory budget explicitly:
+
+```ts
+const firstPending = await outputSession.create({
+  maxMemoryArtifactBytes: 24 * 1024 * 1024,
+});
+const secondPending = await outputSession.create({
+  maxMemoryArtifactBytes: 24 * 1024 * 1024,
+});
+```
+
+Each explicit capacity also reserves page-rounded source storage and Blob
+materialization headroom. A sequential queue that retains completed artifacts,
+including the Vite demo, should keep using `create()` without this option so
+each new pending output derives its capacity from the session's current
+remaining budget.
+
+Storage-capacity failures use
+`code === 'RESOURCE_LIMIT_EXCEEDED'` with
+`reason === 'output-storage-limit'`, including native OPFS quota failures.
+Target container or encoder representability failures use
+`code === 'UNSUPPORTED_OUTPUT'` with `reason === 'target-size-limit'`.
+Other failures must not be mapped from a code alone.
+
+Known `AudioTranscoderError` values retain `code`, optional `reason`, and
+`message` across Workers. An unclassified Worker `Error` retains its
+`name`, `message`, and stack when available without receiving a fabricated
+package code. A destination-local failure keeps the original local thrown
+value when its Worker representation returns. Log that fallback diagnostic;
+do not branch on message text.
+
+### 0.3.0 memory lease migration
+
+The memory fallback now reserves page storage and Blob materialization
+headroom atomically when `session.create()` resolves. A no-argument call
+reserves the largest currently safe artifact capacity, so a second concurrent
+pending memory output may receive `maxOutputBytes: 0`. Sequential callers can
+keep the existing no-argument call, including when completed artifacts remain
+available for download. Concurrent callers should pass a non-negative safe
+integer `maxMemoryArtifactBytes` for every pending output and size the session
+budget for all leases. OPFS ignores this option because it does not consume the
+memory budget. This behavioral change warrants `0.3.0`; Release Please owns the
+version update.
 
 OPFS data does not automatically disappear when a tab closes. Explicit,
 awaited disposal is authoritative. An integrated transcoder should keep

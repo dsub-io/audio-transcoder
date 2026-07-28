@@ -59,7 +59,23 @@ export interface AudioTranscoderOutputMemoryReservation {
   readonly reservedBytes: number;
 }
 
+export interface CreateAudioTranscoderPendingOutputOptions {
+  /**
+   * Exact final-artifact capacity to reserve if this destination uses the
+   * memory fallback. The lease also covers page rounding and Blob
+   * materialization headroom. Omit to reserve the largest currently safe
+   * capacity; OPFS destinations do not consume this memory reservation.
+   */
+  readonly maxMemoryArtifactBytes?: number;
+}
+
 export interface AudioTranscoderPendingOutput {
+  /**
+   * Guaranteed maximum final artifact size for this destination. Present for
+   * the bounded-memory fallback and absent for browser-quota-managed OPFS.
+   * Pass this value to `transcode()` as `maxOutputBytes`.
+   */
+  readonly maxOutputBytes?: number;
   readonly storage: AudioTranscoderOutputStorage;
   /** Seekable destination passed directly to a streaming transcoder. */
   readonly stream: AudioStreamOutput;
@@ -76,7 +92,9 @@ export interface AudioTranscoderPendingOutput {
 
 export interface AudioTranscoderOutputSession {
   /** Creates a tracked output destination. This session owns it until disposal. */
-  create(): Promise<AudioTranscoderPendingOutput>;
+  create(
+    options?: CreateAudioTranscoderPendingOutputOptions,
+  ): Promise<AudioTranscoderPendingOutput>;
   /**
    * Idempotently settles every tracked output and artifact before resolving.
    * A resource whose earlier cleanup failed remains tracked and is retried by

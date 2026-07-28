@@ -164,6 +164,24 @@ describe('built-in AIFF stream encoder', () => {
     await encoder.finalize();
   });
 
+  it('classifies an unrepresentable AIFF size as a target limit', async () => {
+    const destination = createDestination();
+    const encoder = createAiffStreamEncoder(
+      createConfiguration({ channels: 1, writable: destination.stream }),
+      16,
+    );
+    await encoder.start();
+    const oversized = {
+      length: 0x1_0000_0000,
+    } as unknown as Float32Array;
+
+    await expect(encoder.write(oversized, 0)).rejects.toMatchObject({
+      code: 'UNSUPPORTED_OUTPUT',
+      reason: 'target-size-limit',
+    });
+    await encoder.cancel();
+  });
+
   it('aborts and unlocks the destination idempotently', async () => {
     const destination = createDestination();
     const encoder = createAiffStreamEncoder(
@@ -377,7 +395,8 @@ describe('built-in AIFF stream encoder', () => {
     } as unknown as Float32Array;
 
     await expect(encoder.write(oversizedSamples, 0)).rejects.toMatchObject({
-      code: 'RESOURCE_LIMIT_EXCEEDED',
+      code: 'UNSUPPORTED_OUTPUT',
+      reason: 'target-size-limit',
     });
     await encoder.cancel();
   });

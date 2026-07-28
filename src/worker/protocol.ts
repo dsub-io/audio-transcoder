@@ -5,7 +5,10 @@ import type {
   EncodedAudio,
   PcmAudio,
 } from '../engine/contracts.js';
-import type { AudioTranscoderErrorCode } from '../errors.js';
+import type {
+  AudioTranscoderErrorCode,
+  AudioTranscoderErrorReason,
+} from '../errors.js';
 
 export type WorkerOperation = 'decode' | 'encode' | 'transcode';
 
@@ -39,6 +42,8 @@ export interface SerializedWorkerError {
   readonly code?: AudioTranscoderErrorCode;
   readonly message: string;
   readonly name: string;
+  readonly reason?: AudioTranscoderErrorReason;
+  readonly stack?: string;
 }
 
 export type AudioWorkerResponse =

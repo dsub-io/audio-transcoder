@@ -20,13 +20,33 @@ export type AudioTranscoderErrorCode =
   | 'WORKER_TERMINATED'
   | 'WORKER_UNAVAILABLE';
 
-/** Package-defined error; branch on `code`, not the human-readable message. */
+/** Stable machine-readable context for errors that share the same `code`. */
+export type AudioTranscoderErrorReason =
+  | 'output-storage-limit'
+  | 'target-size-limit';
+
+export interface AudioTranscoderErrorOptions {
+  readonly reason?: AudioTranscoderErrorReason;
+}
+
+/**
+ * Package-defined error. Branch on `code` and, when needed, optional `reason`;
+ * never branch on the human-readable message.
+ */
 export class AudioTranscoderError extends Error {
   readonly code: AudioTranscoderErrorCode;
+  readonly reason?: AudioTranscoderErrorReason;
 
-  constructor(code: AudioTranscoderErrorCode, message: string) {
+  constructor(
+    code: AudioTranscoderErrorCode,
+    message: string,
+    options: AudioTranscoderErrorOptions = {},
+  ) {
     super(message);
     this.name = 'AudioTranscoderError';
     this.code = code;
+    if (options.reason !== undefined) {
+      this.reason = options.reason;
+    }
   }
 }

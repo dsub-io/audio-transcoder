@@ -19,6 +19,7 @@ import type {
 import { AUDIO_TRANSCODER_STREAM_CAPABILITIES } from './capabilities.js';
 import type { AudioTranscoderStreamCapabilities } from './capabilities.js';
 import { AUDIO_TRANSCODER_VERSION } from '../package-metadata.js';
+import { AudioTranscoderError } from '../errors.js';
 
 const INSPECTION: AudioStreamInspection = {
   bitDepth: 24,
@@ -95,7 +96,12 @@ describe('stream worker client', () => {
       input,
       { presetId: 'wav-pcm16' },
       output,
-      { onProgress, outputChunkBytes: 65_536, pcmChunkBytes: 131_072 },
+      {
+        maxOutputBytes: 4 * 1024 * 1024,
+        onProgress,
+        outputChunkBytes: 65_536,
+        pcmChunkBytes: 131_072,
+      },
     );
 
     expect(engine.getVersion()).toBe(AUDIO_TRANSCODER_VERSION);
@@ -121,7 +127,11 @@ describe('stream worker client', () => {
 
     expect(worker.posts[1]?.message).toMatchObject({
       id: 2,
-      options: { outputChunkBytes: 65_536, pcmChunkBytes: 131_072 },
+      options: {
+        maxOutputBytes: 4 * 1024 * 1024,
+        outputChunkBytes: 65_536,
+        pcmChunkBytes: 131_072,
+      },
       type: 'transcode',
     });
     expect(worker.posts[1]?.transfer).toHaveLength(1);
@@ -810,7 +820,10 @@ describe('stream worker client', () => {
   it('propagates destination close failures', async () => {
     const worker = new WorkerStub();
     const engine = createEngine(worker);
-    const closeError = new Error('destination close failed');
+    const closeError = new AudioTranscoderError(
+      'RESOURCE_LIMIT_EXCEEDED',
+      'destination close failed',
+    );
     const result = engine.transcode(
       { blob: new Blob(['a']) },
       { presetId: 'wav-pcm16' },
@@ -830,6 +843,155 @@ describe('stream worker client', () => {
     });
     await expect(result).rejects.toBe(closeError);
     engine.terminate();
+  });
+
+  it('restores a local destination error from its code-less Worker clone', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const writeError = new AudioTranscoderError(
+      'RESOURCE_LIMIT_EXCEEDED',
+      'destination quota exceeded',
+    );
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      new WritableStream<AudioStreamOutputChunk>({
+        write() {
+          throw writeError;
+        },
+      }),
+    );
+
+    await expect(
+      worker.writePostedOutput(1, {
+        data: new Uint8Array([1]),
+        position: 0,
+        type: 'write',
+      }),
+    ).rejects.toBe(writeError);
+    worker.emit({
+      error: { message: writeError.message, name: 'Error' },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toBe(writeError);
+    await engine.dispose();
+  });
+
+  it('restores a primitive destination reason from its Worker representation', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const writeReason = 'destination quota exceeded';
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      new WritableStream<AudioStreamOutputChunk>({
+        write() {
+          throw writeReason;
+        },
+      }),
+    );
+
+    await expect(
+      worker.writePostedOutput(1, {
+        data: new Uint8Array([1]),
+        position: 0,
+        type: 'write',
+      }),
+    ).rejects.toBe(writeReason);
+    worker.emit({
+      error: { message: writeReason, name: 'Error' },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toBe(writeReason);
+    await engine.dispose();
+  });
+
+  it('restores the original opaque destination rejection from its Worker clone', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const writeReason = { message: 'destination quota exceeded' };
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      new WritableStream<AudioStreamOutputChunk>({
+        write() {
+          throw writeReason;
+        },
+      }),
+    );
+
+    await expect(
+      worker.writePostedOutput(1, {
+        data: new Uint8Array([1]),
+        position: 0,
+        type: 'write',
+      }),
+    ).rejects.toBe(writeReason);
+    worker.emit({
+      error: { message: writeReason.message, name: 'Error' },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toBe(writeReason);
+    await engine.dispose();
+  });
+
+  it('preserves a classified target-size Worker error across the client boundary', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const result = engine.inspect({ blob: new Blob(['a']) });
+
+    worker.emit({
+      error: {
+        code: 'UNSUPPORTED_OUTPUT',
+        message: 'RIFF cannot represent this output',
+        name: 'AudioTranscoderError',
+        reason: 'target-size-limit',
+      },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toMatchObject({
+      code: 'UNSUPPORTED_OUTPUT',
+      message: 'RIFF cannot represent this output',
+      name: 'AudioTranscoderError',
+      reason: 'target-size-limit',
+    });
+    await engine.dispose();
+  });
+
+  it('preserves unknown Worker Error diagnostics without inventing a classification', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const result = engine.inspect({ blob: new Blob(['a']) });
+    const stack = 'TypeError: codec failed\n    at worker-codec.js:4:2';
+
+    worker.emit({
+      error: {
+        message: 'codec failed',
+        name: 'TypeError',
+        stack,
+      },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toMatchObject({
+      message: 'codec failed',
+      name: 'TypeError',
+      stack,
+    });
+    await result.catch((error: unknown) => {
+      expect(error).not.toHaveProperty('code');
+      expect(error).not.toHaveProperty('reason');
+    });
+    await engine.dispose();
   });
 
   it('rejects invalid, locked, and pre-aborted transcode outputs', async () => {
@@ -1095,10 +1257,13 @@ describe('stream worker client', () => {
     expect(output.locked).toBe(false);
   });
 
-  it('does not re-abort a bridge already failed by a destination write', async () => {
+  it('keeps a coded Worker error primary when it matches a destination failure', async () => {
     const worker = new WorkerStub();
     const engine = createEngine(worker);
-    const writeError = new Error('write failed first');
+    const writeError = new AudioTranscoderError(
+      'RESOURCE_LIMIT_EXCEEDED',
+      'write failed first',
+    );
     const result = engine.transcode(
       { blob: new Blob(['a']) },
       { presetId: 'wav-pcm16' },
@@ -1116,12 +1281,160 @@ describe('stream worker client', () => {
       }),
     ).rejects.toBe(writeError);
     worker.emit({
-      error: { message: 'Worker observed write failure', name: 'Error' },
+      error: {
+        code: 'INVALID_AUDIO_DATA',
+        message: writeError.message,
+        name: 'AudioTranscoderError',
+      },
       id: 1,
       type: 'error',
     });
 
-    await expect(result).rejects.toThrow('Worker observed write failure');
+    await expect(result).rejects.toMatchObject({
+      code: 'INVALID_AUDIO_DATA',
+      message: writeError.message,
+    });
+    await engine.dispose();
+  });
+
+  it('restores the original classified destination error when code and reason match', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const writeError = new AudioTranscoderError(
+      'RESOURCE_LIMIT_EXCEEDED',
+      'destination capacity exceeded',
+      { reason: 'output-storage-limit' },
+    );
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      new WritableStream<AudioStreamOutputChunk>({
+        write() {
+          throw writeError;
+        },
+      }),
+    );
+    await expect(
+      worker.writePostedOutput(1, {
+        data: new Uint8Array([1]),
+        position: 0,
+        type: 'write',
+      }),
+    ).rejects.toBe(writeError);
+    worker.emit({
+      error: {
+        code: writeError.code,
+        message: writeError.message,
+        name: writeError.name,
+        reason: 'output-storage-limit',
+      },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toBe(writeError);
+    await engine.dispose();
+  });
+
+  it('keeps a Worker error primary when its message differs from the destination failure', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const writeError = new Error('destination write failed');
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      new WritableStream<AudioStreamOutputChunk>({
+        write() {
+          throw writeError;
+        },
+      }),
+    );
+    await expect(
+      worker.writePostedOutput(1, {
+        data: new Uint8Array([1]),
+        position: 0,
+        type: 'write',
+      }),
+    ).rejects.toBe(writeError);
+    worker.emit({
+      error: {
+        message: 'worker conversion failed',
+        name: 'Error',
+      },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toMatchObject({
+      message: 'worker conversion failed',
+      name: 'Error',
+    });
+    await engine.dispose();
+  });
+
+  it('keeps a classified Worker error primary over an unclassified destination failure', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const writeError = new Error('shared failure message');
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      new WritableStream<AudioStreamOutputChunk>({
+        write() {
+          throw writeError;
+        },
+      }),
+    );
+    await expect(
+      worker.writePostedOutput(1, {
+        data: new Uint8Array([1]),
+        position: 0,
+        type: 'write',
+      }),
+    ).rejects.toBe(writeError);
+    worker.emit({
+      error: {
+        code: 'INVALID_AUDIO_DATA',
+        message: writeError.message,
+        name: 'AudioTranscoderError',
+      },
+      id: 1,
+      type: 'error',
+    });
+
+    await expect(result).rejects.toMatchObject({
+      code: 'INVALID_AUDIO_DATA',
+      message: writeError.message,
+    });
+    await engine.dispose();
+  });
+
+  it('keeps a code-less Worker error primary after a transferred-stream abort', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const remoteAbort = new AudioTranscoderError(
+      'RESOURCE_LIMIT_EXCEEDED',
+      'remote stream aborted',
+    );
+    const result = engine.transcode(
+      { blob: new Blob(['a']) },
+      { presetId: 'wav-pcm16' },
+      new WritableStream<AudioStreamOutputChunk>(),
+    );
+
+    await worker.abortPostedOutput(1, remoteAbort);
+    worker.emit({
+      error: { message: remoteAbort.message, name: 'Error' },
+      id: 1,
+      type: 'error',
+    });
+
+    const rejection = await result.catch((error: unknown) => error);
+    expect(rejection).not.toBe(remoteAbort);
+    expect(rejection).toMatchObject({
+      message: remoteAbort.message,
+      name: 'Error',
+    });
     await engine.dispose();
   });
 

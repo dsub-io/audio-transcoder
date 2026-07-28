@@ -1383,7 +1383,7 @@ describe('bounded streaming engine', () => {
     expect(explicitRiff.rf64).toBe(false);
 
     mocks.customOpen.mockResolvedValue(
-      createSource({ channels: 1, totalFrames: 0xffff_ff00 / 2 }),
+      createSource({ channels: 1, totalFrames: 0x1_0000_0000 / 2 }),
     );
     const estimated = await engine.transcode(
       INPUT,
@@ -1393,12 +1393,119 @@ describe('bounded streaming engine', () => {
     expect(estimated.rf64).toBe(true);
   });
 
+  it.each([
+    {
+      expectedBytes: 104,
+      maxOutputBytes: 103,
+      source: { channels: 2, totalFrames: 10 },
+      target: { presetId: 'wav-pcm24' },
+    },
+    {
+      expectedBytes: 140,
+      maxOutputBytes: 139,
+      source: { channels: 2, totalFrames: 10 },
+      target: { presetId: 'wav-pcm24', wavContainer: 'rf64' },
+    },
+    {
+      expectedBytes: 58,
+      maxOutputBytes: 57,
+      source: { channels: 1, totalFrames: 1 },
+      target: { presetId: 'aiff-pcm24' },
+    },
+  ] as const)(
+    'preflights the complete $target.presetId container at $expectedBytes bytes',
+    async ({ expectedBytes, maxOutputBytes, source, target }) => {
+      mocks.customOpen.mockResolvedValue(createSource(source));
+
+      await expect(
+        createAudioTranscoderStreamEngine().transcode(
+          INPUT,
+          target,
+          createOutput(),
+          { maxOutputBytes },
+        ),
+      ).rejects.toMatchObject({
+        code: 'RESOURCE_LIMIT_EXCEEDED',
+        message:
+          `Predicted uncompressed audio output exceeds maxOutputBytes (${maxOutputBytes} bytes; predicted: ${expectedBytes} bytes).`,
+        reason: 'output-storage-limit',
+      });
+      expect(mocks.outputStart).not.toHaveBeenCalled();
+    },
+  );
+
+  it('describes an unsafe predicted output size without starting the encoder', async () => {
+    mocks.customOpen.mockResolvedValue(
+      createSource({
+        channels: 32,
+        totalFrames: Number.MAX_SAFE_INTEGER,
+      }),
+    );
+
+    await expect(
+      createAudioTranscoderStreamEngine().transcode(
+        INPUT,
+        { presetId: 'wav-pcm32' },
+        createOutput(),
+        { maxOutputBytes: Number.MAX_SAFE_INTEGER },
+      ),
+    ).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      message: expect.stringContaining('predicted: an unsafe size'),
+      reason: 'output-storage-limit',
+    });
+    expect(mocks.outputStart).not.toHaveBeenCalled();
+  });
+
+  it('rejects when container overhead makes an otherwise safe PCM size unsafe', async () => {
+    mocks.customOpen.mockResolvedValue(
+      createSource({
+        channels: 1,
+        totalFrames: (Number.MAX_SAFE_INTEGER - 1) / 2,
+      }),
+    );
+
+    await expect(
+      createAudioTranscoderStreamEngine().transcode(
+        INPUT,
+        { presetId: 'wav-pcm16' },
+        createOutput(),
+        { maxOutputBytes: Number.MAX_SAFE_INTEGER },
+      ),
+    ).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      message: expect.stringContaining('predicted: an unsafe size'),
+      reason: 'output-storage-limit',
+    });
+    expect(mocks.outputStart).not.toHaveBeenCalled();
+  });
+
+  it('enforces maxOutputBytes while encoding when output size is unknown', async () => {
+    mocks.customOpen.mockResolvedValue(
+      createSource({ durationSeconds: null, totalFrames: null }),
+    );
+
+    await expect(
+      createAudioTranscoderStreamEngine().transcode(
+        INPUT,
+        { presetId: 'wav-pcm16' },
+        createOutput(),
+        { maxOutputBytes: 50 },
+      ),
+    ).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      message:
+        'Streaming output exceeds maxOutputBytes (50 bytes; attempted end: 100 bytes).',
+      reason: 'output-storage-limit',
+    });
+  });
+
   it('uses duration estimates and RF64 for unknown frame counts', async () => {
     const engine = createAudioTranscoderStreamEngine();
     mocks.customOpen.mockResolvedValue(
       createSource({
         channels: 1,
-        durationSeconds: 0xffff_ff00 / 2 / 48_000,
+        durationSeconds: 0x1_0000_0000 / 2 / 48_000,
         totalFrames: null,
       }),
     );
@@ -1420,7 +1527,7 @@ describe('bounded streaming engine', () => {
 
   it('rejects forced RIFF when the predicted PCM exceeds 4 GiB', async () => {
     mocks.customOpen.mockResolvedValue(
-      createSource({ channels: 1, totalFrames: 0xffff_ff00 / 2 }),
+      createSource({ channels: 1, totalFrames: 0x1_0000_0000 / 2 }),
     );
     await expect(
       createAudioTranscoderStreamEngine().transcode(
@@ -1428,8 +1535,47 @@ describe('bounded streaming engine', () => {
         { presetId: 'wav-pcm16', wavContainer: 'riff' },
         createOutput(),
       ),
-    ).rejects.toMatchObject({ code: 'UNSUPPORTED_OUTPUT' });
+    ).rejects.toMatchObject({
+      code: 'UNSUPPORTED_OUTPUT',
+      reason: 'target-size-limit',
+    });
+    expect(mocks.outputStart).not.toHaveBeenCalled();
   });
+
+  it.each([
+    {
+      source: {
+        channels: 1,
+        totalFrames: Math.floor((0xffff_ffff - 8) / 2) + 1,
+      },
+      target: { presetId: 'aiff-pcm16' },
+    },
+    {
+      source: {
+        channels: 1,
+        sampleRate: 8_000,
+        totalFrames: Number.MAX_SAFE_INTEGER,
+      },
+      target: { presetId: 'ogg-opus-128kbps', sampleRate: 48_000 },
+    },
+  ] as const)(
+    'rejects a known $target.presetId target-size limit before encoder start',
+    async ({ source, target }) => {
+      mocks.customOpen.mockResolvedValue(createSource(source));
+
+      await expect(
+        createAudioTranscoderStreamEngine().transcode(
+          INPUT,
+          target,
+          createOutput(),
+        ),
+      ).rejects.toMatchObject({
+        code: 'UNSUPPORTED_OUTPUT',
+        reason: 'target-size-limit',
+      });
+      expect(mocks.outputStart).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([
     ['auto high-depth', { bitDepth: 32 }, { presetId: 'wav-pcm16' }],
@@ -1534,6 +1680,20 @@ describe('bounded streaming engine', () => {
           { presetId: 'wav-pcm16' },
           createOutput(),
           { outputChunkBytes },
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' });
+    },
+  );
+
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    'rejects invalid max output bytes %s',
+    async (maxOutputBytes) => {
+      await expect(
+        createAudioTranscoderStreamEngine().transcode(
+          INPUT,
+          { presetId: 'wav-pcm16' },
+          createOutput(),
+          { maxOutputBytes },
         ),
       ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' });
     },

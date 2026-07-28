@@ -52,7 +52,11 @@ import {
   raceWithOperationAbort,
 } from './abortable-operation.js';
 
-const RIFF_SAFE_BYTES = 0xffff_ff00;
+const MAX_UINT32 = 0xffff_ffff;
+const RIFF_MAX_OUTPUT_BYTES = MAX_UINT32;
+const AIFF_HEADER_BYTES = 54;
+const RIFF_WAV_HEADER_BYTES = 44;
+const RF64_WAV_HEADER_BYTES = 80;
 
 interface ResolvedEncoding {
   readonly bitDepth: number | null;
@@ -191,6 +195,10 @@ export function createAudioTranscoderStreamEngine(
           source,
           codecRuntime.capabilities,
         );
+        assertPredictedOutputWithinLimit(
+          resolvedTarget.estimatedOutputBytes,
+          operation.maxOutputBytes,
+        );
         if (source.sampleRate === resolvedTarget.sampleRate) {
           resampler = null;
         } else {
@@ -213,7 +221,11 @@ export function createAudioTranscoderStreamEngine(
         }
         reporter.throwIfAborted();
 
-        outputTransaction = createAudioStreamOutputTransaction(writable);
+        outputTransaction = createAudioStreamOutputTransaction(
+          writable,
+          operation.maxOutputBytes,
+          resolvedTarget.maxRepresentableOutputBytes ?? undefined,
+        );
         const encoderCreation = codecRuntime.encoder.create({
           channels: resolvedTarget.channels,
           outputChunkBytes: operation.outputChunkBytes,
@@ -437,6 +449,8 @@ interface ResolvedTarget {
   readonly channels: number;
   readonly dither: AudioDitherMode;
   readonly encoding: ResolvedEncoding;
+  readonly estimatedOutputBytes: number | null;
+  readonly maxRepresentableOutputBytes: number | null;
   readonly resampleQuality: 'balanced' | 'best' | 'fast';
   readonly rf64: boolean | null;
   readonly sampleRate: number;
@@ -506,17 +520,21 @@ function resolveTarget(
     );
   }
 
-  const estimatedFrames =
+  const estimatedInputFrames =
     source.totalFrames ??
     (source.durationSeconds === null
       ? null
       : Math.ceil(source.durationSeconds * source.sampleRate));
-  const estimatedBytes =
-    encoding.format !== 'wav' ||
-    encoding.bitDepth === null ||
-    estimatedFrames === null
+  const estimatedOutputFrames =
+    estimatedInputFrames === null
       ? null
-      : Math.floor((estimatedFrames * sampleRate) / source.sampleRate) *
+      : Math.floor(
+          (estimatedInputFrames * sampleRate) / source.sampleRate,
+        );
+  const estimatedPcmBytes =
+    encoding.bitDepth === null || estimatedOutputFrames === null
+      ? null
+      : estimatedOutputFrames *
           channels *
           (encoding.bitDepth / 8);
   if (encoding.format !== 'wav' && target.wavContainer !== undefined) {
@@ -562,26 +580,78 @@ function resolveTarget(
   }
   const rf64 = wavContainer === null
     ? null
-    : resolveRf64(wavContainer, estimatedBytes);
-  if (
-    wavContainer === 'riff' &&
-    estimatedBytes !== null &&
-    estimatedBytes >= RIFF_SAFE_BYTES
-  ) {
-    throw new AudioTranscoderError(
-      'UNSUPPORTED_OUTPUT',
-      'The predicted WAV exceeds the RIFF 4 GiB limit; use RF64 or auto.',
-    );
-  }
+    : resolveRf64(wavContainer, estimatedPcmBytes);
+  const estimatedOutputBytes = estimateOutputBytes(
+    encoding.format,
+    estimatedPcmBytes,
+    rf64,
+  );
+  assertRepresentableTargetSize(
+    encoding.format,
+    estimatedOutputFrames,
+    estimatedPcmBytes,
+    estimatedOutputBytes,
+    wavContainer,
+  );
 
   return {
     channels,
     dither,
     encoding,
+    estimatedOutputBytes,
+    maxRepresentableOutputBytes:
+      encoding.format === 'wav' && rf64 === false
+        ? RIFF_MAX_OUTPUT_BYTES
+        : null,
     resampleQuality,
     rf64,
     sampleRate,
   };
+}
+
+function assertPredictedOutputWithinLimit(
+  estimatedOutputBytes: number | null,
+  maxOutputBytes: number | undefined,
+): void {
+  if (
+    maxOutputBytes === undefined ||
+    estimatedOutputBytes === null ||
+    estimatedOutputBytes <= maxOutputBytes
+  ) {
+    return;
+  }
+  throw new AudioTranscoderError(
+    'RESOURCE_LIMIT_EXCEEDED',
+    `Predicted uncompressed audio output exceeds maxOutputBytes (${maxOutputBytes} bytes; predicted: ${
+      Number.isSafeInteger(estimatedOutputBytes)
+        ? `${estimatedOutputBytes} bytes`
+        : 'an unsafe size'
+    }).`,
+    { reason: 'output-storage-limit' },
+  );
+}
+
+function estimateOutputBytes(
+  format: AudioStreamOutputFormatId,
+  pcmBytes: number | null,
+  rf64: boolean | null,
+): number | null {
+  if (pcmBytes === null || (format !== 'aiff' && format !== 'wav')) {
+    return null;
+  }
+  if (!Number.isSafeInteger(pcmBytes)) {
+    return Number.POSITIVE_INFINITY;
+  }
+  const overhead =
+    format === 'aiff'
+      ? AIFF_HEADER_BYTES + (pcmBytes % 2)
+      : rf64 === true
+        ? RF64_WAV_HEADER_BYTES
+        : RIFF_WAV_HEADER_BYTES;
+  const outputBytes = pcmBytes + overhead;
+  return Number.isSafeInteger(outputBytes)
+    ? outputBytes
+    : Number.POSITIVE_INFINITY;
 }
 
 function resolveRf64(
@@ -594,7 +664,65 @@ function resolveRf64(
   if (mode === 'riff') {
     return false;
   }
-  return estimatedBytes === null || estimatedBytes >= RIFF_SAFE_BYTES;
+  const estimatedRiffBytes = estimateOutputBytes(
+    'wav',
+    estimatedBytes,
+    false,
+  );
+  return (
+    estimatedRiffBytes === null ||
+    estimatedRiffBytes > RIFF_MAX_OUTPUT_BYTES
+  );
+}
+
+function assertRepresentableTargetSize(
+  format: AudioStreamOutputFormatId,
+  estimatedFrames: number | null,
+  estimatedPcmBytes: number | null,
+  estimatedOutputBytes: number | null,
+  wavContainer: WavContainerMode | null,
+): void {
+  if (
+    format === 'wav' &&
+    wavContainer === 'riff' &&
+    estimatedOutputBytes !== null &&
+    estimatedOutputBytes > RIFF_MAX_OUTPUT_BYTES
+  ) {
+    throw targetSizeLimit(
+      'The predicted WAV exceeds the RIFF 4 GiB limit; use RF64 or auto.',
+    );
+  }
+  if (
+    format === 'aiff' &&
+    estimatedFrames !== null &&
+    estimatedPcmBytes !== null &&
+    estimatedOutputBytes !== null &&
+    (!Number.isSafeInteger(estimatedFrames) ||
+      estimatedFrames > MAX_UINT32 ||
+      !Number.isSafeInteger(estimatedPcmBytes) ||
+      estimatedPcmBytes > MAX_UINT32 - 8 ||
+      !Number.isSafeInteger(estimatedOutputBytes) ||
+      estimatedOutputBytes - 8 > MAX_UINT32)
+  ) {
+    throw targetSizeLimit(
+      'The predicted AIFF exceeds the format\'s 32-bit frame or chunk-size limit.',
+    );
+  }
+  if (
+    format === 'ogg' &&
+    estimatedFrames !== null &&
+    !Number.isSafeInteger(estimatedFrames)
+  ) {
+    throw targetSizeLimit(
+      'The predicted Ogg Opus output exceeds the safe JavaScript frame-count limit.',
+    );
+  }
+}
+
+function targetSizeLimit(message: string): AudioTranscoderError {
+  return new AudioTranscoderError('UNSUPPORTED_OUTPUT', message, {
+    reason: 'target-size-limit',
+  });
 }
 
 async function writeSamples(
@@ -688,6 +816,7 @@ function resolveOperationOptions(
   bufferLimits: AudioStreamLimits['buffers'],
 ): {
   readonly inputReadBytes: number;
+  readonly maxOutputBytes: number | undefined;
   readonly outputChunkBytes: number;
   readonly pcmChunkBytes: number;
 } {
@@ -698,6 +827,7 @@ function resolveOperationOptions(
       'inputReadBytes',
       bufferLimits,
     ),
+    maxOutputBytes: validateMaxOutputBytes(options.maxOutputBytes),
     outputChunkBytes: validateBufferSize(
       options.outputChunkBytes,
       bufferLimits.defaultOutputChunkBytes,
@@ -711,6 +841,19 @@ function resolveOperationOptions(
       bufferLimits,
     ),
   };
+}
+
+function validateMaxOutputBytes(value: number | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new AudioTranscoderError(
+      'INVALID_CONFIGURATION',
+      'maxOutputBytes must be a non-negative safe integer.',
+    );
+  }
+  return value;
 }
 
 function validateBufferSize(

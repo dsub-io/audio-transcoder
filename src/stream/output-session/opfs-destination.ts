@@ -1,8 +1,7 @@
+import { AudioTranscoderError } from '../../errors.js';
 import type { AudioStreamOutput, AudioStreamOutputChunk } from '../contracts.js';
 import {
-  collectFailures,
   invalidConfiguration,
-  throwCollectedFailures,
   type OutputDestination,
 } from './internal.js';
 
@@ -51,7 +50,13 @@ class OpfsDestination implements OutputDestination {
     this.stream = new WritableStream<AudioStreamOutputChunk>({
       abort: (reason) => this.abortNative(reason),
       close: () => this.closeNative(),
-      write: (chunk) => this.writer.write(chunk),
+      write: async (chunk) => {
+        try {
+          await this.writer.write(chunk);
+        } catch (error) {
+          throw normalizeOpfsQuotaError(error, 'write');
+        }
+      },
     });
   }
 
@@ -68,13 +73,11 @@ class OpfsDestination implements OutputDestination {
   }
 
   async discard(): Promise<void> {
-    const failures: unknown[] = [];
-    collectFailures(
-      await Promise.allSettled([this.abortNative(undefined)]),
-      failures,
-    );
-    collectFailures(await Promise.allSettled([this.remove()]), failures);
-    throwCollectedFailures(failures, 'Failed to discard OPFS output.');
+    // A failed native close remains cached by the platform writer. Once the
+    // backing file is removed, that stale rejection no longer represents a
+    // live resource and must not prevent cleanup from converging.
+    await this.abortNative(undefined).catch(() => undefined);
+    await this.remove();
   }
 
   private abortNative(reason: unknown): Promise<void> {
@@ -83,7 +86,11 @@ class OpfsDestination implements OutputDestination {
 
   private closeNative(): Promise<void> {
     return this.settleNative(async () => {
-      await this.writer.close();
+      try {
+        await this.writer.close();
+      } catch (error) {
+        throw normalizeOpfsQuotaError(error, 'close');
+      }
       this.closed = true;
     });
   }
@@ -128,5 +135,24 @@ function isNotFoundError(error: unknown): boolean {
     error !== null &&
     'name' in error &&
     error.name === 'NotFoundError'
+  );
+}
+
+function normalizeOpfsQuotaError(
+  error: unknown,
+  operation: 'close' | 'write',
+): unknown {
+  if (
+    typeof error !== 'object' ||
+    error === null ||
+    !('name' in error) ||
+    error.name !== 'QuotaExceededError'
+  ) {
+    return error;
+  }
+  return new AudioTranscoderError(
+    'RESOURCE_LIMIT_EXCEEDED',
+    `OPFS output storage quota was exceeded during destination ${operation}.`,
+    { reason: 'output-storage-limit' },
   );
 }

@@ -177,6 +177,14 @@ export interface AudioStreamOperationOptions {
    * decoder-validation read budget. Defaults to 8 MiB.
    */
   readonly inputReadBytes?: number;
+  /**
+   * Optional whole-artifact byte limit. Known uncompressed outputs reject
+   * during preparation when their predicted full container size exceeds this
+   * value; every output write is also checked so unknown or compressed sizes
+   * cannot cross the limit while encoding. Limit failures use
+   * `reason === 'output-storage-limit'`.
+   */
+  readonly maxOutputBytes?: number;
   /** One buffered output-chunk limit, not total memory. Defaults to 4 MiB. */
   readonly outputChunkBytes?: number;
   /** One decoded PCM yield limit, not total memory. Defaults to 4 MiB. */

@@ -267,8 +267,9 @@ function assertRepresentableAiffSize(
     formSize > MAX_UINT32
   ) {
     throw new AudioTranscoderError(
-      'RESOURCE_LIMIT_EXCEEDED',
+      'UNSUPPORTED_OUTPUT',
       'AIFF output exceeds the format\'s 32-bit frame or chunk-size limit.',
+      { reason: 'target-size-limit' },
     );
   }
 }

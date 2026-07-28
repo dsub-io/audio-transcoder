@@ -3,6 +3,7 @@ import type { AudioStreamOutput } from '../contracts.js';
 import type { AudioTranscoderOutputStorage } from '../output-session.js';
 
 export interface OutputDestination {
+  readonly maxOutputBytes?: number;
   readonly storage: AudioTranscoderOutputStorage;
   readonly stream: AudioStreamOutput;
   complete(mimeType: string): Promise<Blob>;

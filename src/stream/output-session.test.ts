@@ -5,6 +5,7 @@ import {
   createAudioTranscoderOutputSession,
 } from './output-session.js';
 import type { OutputDestination } from './output-session/internal.js';
+import { SessionMemoryBudget } from './output-session/memory-destination.js';
 import { createOpfsDestination } from './output-session/opfs-destination.js';
 import { ManagedPendingOutput } from './output-session/resource.js';
 
@@ -62,16 +63,91 @@ describe('output session configuration', () => {
     });
     await session.dispose();
   });
+
+  it('validates per-output memory artifact capacities', async () => {
+    vi.stubGlobal('navigator', {});
+    const session = createAudioTranscoderOutputSession({
+      memoryLimitBytes: 16,
+    });
+
+    for (const maxMemoryArtifactBytes of [
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      await expect(
+        session.create({ maxMemoryArtifactBytes }),
+      ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' });
+    }
+    await expect(
+      session.create(null as never),
+    ).rejects.toMatchObject({ code: 'INVALID_CONFIGURATION' });
+
+    const zero = await session.create({ maxMemoryArtifactBytes: 0 });
+    expect(zero.maxOutputBytes).toBe(0);
+    await zero.discard();
+    await session.dispose();
+  });
 });
 
 describe('paged memory fallback', () => {
+  it('rejects reservations beyond the aggregate memory budget', () => {
+    const budget = new SessionMemoryBudget(4);
+    budget.reserve(3);
+
+    expect(() => budget.reserve(2)).toThrow(
+      expect.objectContaining({
+        code: 'RESOURCE_LIMIT_EXCEEDED',
+        message:
+          'Session memory budget exceeded: 3 bytes reserved, 2 requested, 4 limit.',
+        reason: 'output-storage-limit',
+      }),
+    );
+  });
+
+  it.each([
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['NaN', Number.NaN],
+    ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+    ['oversized', 3],
+  ])('releases a lease after rejecting a %s committed size', (_label, size) => {
+    const budget = new SessionMemoryBudget(4);
+    const lease = budget.acquireArtifactLease(2, 2);
+
+    expect(() => lease.commit(size)).toThrow(
+      expect.objectContaining({
+        code: 'RESOURCE_LIMIT_EXCEEDED',
+        reason: 'output-storage-limit',
+      }),
+    );
+    expect(budget.snapshot().reservedBytes).toBe(0);
+    lease.release();
+    expect(budget.snapshot().reservedBytes).toBe(0);
+  });
+
+  it('preserves committed bytes when a lease rejects a second commit', () => {
+    const budget = new SessionMemoryBudget(4);
+    const lease = budget.acquireArtifactLease(2, 2);
+
+    lease.commit(1);
+    expect(budget.snapshot().reservedBytes).toBe(1);
+    expect(() => lease.commit(1)).toThrow(
+      expect.objectContaining({ code: 'INVALID_CONFIGURATION' }),
+    );
+    expect(budget.snapshot().reservedBytes).toBe(1);
+    lease.release();
+    expect(budget.snapshot().reservedBytes).toBe(0);
+  });
+
   it('supports seekable writes, sparse pages, artifact metadata, and cleanup', async () => {
     vi.stubGlobal('navigator', { storage: {} });
     const session = createAudioTranscoderOutputSession({
-      memoryLimitBytes: 2 * (1024 * 1024 + 2),
+      memoryLimitBytes: 4 * 1024 * 1024,
       namespace: 'memory-test',
     });
     const pending = await session.create();
+    expect(pending.maxOutputBytes).toBe(2 * 1024 * 1024);
     const writer = pending.stream.getWriter();
     await writer.write(chunk(1024 * 1024 + 1, [3]));
     await writer.write(chunk(1024 * 1024, [2]));
@@ -147,7 +223,7 @@ describe('paged memory fallback', () => {
     await session.dispose();
   });
 
-  it('enforces one aggregate budget across concurrent pending and completed outputs', async () => {
+  it('leases capacity atomically across concurrent pending and completed outputs', async () => {
     vi.stubGlobal('navigator', {});
     const session = createAudioTranscoderOutputSession({ memoryLimitBytes: 8 });
     const initialReservation = session.getMemoryReservation();
@@ -156,77 +232,150 @@ describe('paged memory fallback', () => {
 
     const first = await session.create();
     const second = await session.create();
+    expect(first.maxOutputBytes).toBe(4);
+    expect(second.maxOutputBytes).toBe(0);
+    expect(session.getMemoryReservation().reservedBytes).toBe(8);
     const firstWriter = first.stream.getWriter();
     const secondWriter = second.stream.getWriter();
-    await Promise.all([
-      firstWriter.write(chunk(0, [1, 2])),
-      secondWriter.write(chunk(1, [3])),
-    ]);
-    expect(session.getMemoryReservation().reservedBytes).toBe(4);
-    await Promise.all([firstWriter.close(), secondWriter.close()]);
+    await firstWriter.write(chunk(0, [1, 2]));
+    await expect(secondWriter.write(chunk(0, [3]))).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      reason: 'output-storage-limit',
+    });
+    expect(session.getMemoryReservation().reservedBytes).toBe(8);
+    await firstWriter.close();
     firstWriter.releaseLock();
     secondWriter.releaseLock();
+    await second.discard();
 
     const firstArtifact = await first.complete({
       mimeType: 'audio/test',
       name: 'first.test',
     });
-    await second.complete({
-      mimeType: 'audio/test',
-      name: 'second.test',
-    });
-    expect(session.getMemoryReservation().reservedBytes).toBe(4);
+    expect(session.getMemoryReservation().reservedBytes).toBe(2);
 
     const third = await session.create();
-    const thirdWriter = third.stream.getWriter();
-    await thirdWriter.write(chunk(3, [4]));
+    expect(third.maxOutputBytes).toBe(3);
     expect(session.getMemoryReservation().reservedBytes).toBe(8);
-
-    const rejected = await session.create();
-    const rejectedWriter = rejected.stream.getWriter();
-    await expect(rejectedWriter.write(chunk(0, [5]))).rejects.toMatchObject({
-      code: 'RESOURCE_LIMIT_EXCEEDED',
-      message:
-        'Session memory budget exceeded: 8 bytes reserved, 1 requested, 8 limit.',
-    });
-    rejectedWriter.releaseLock();
-    await rejected.discard();
+    const thirdWriter = third.stream.getWriter();
+    await thirdWriter.write(chunk(2, [4]));
+    expect(session.getMemoryReservation().reservedBytes).toBe(8);
 
     await firstArtifact.dispose();
     expect(session.getMemoryReservation().reservedBytes).toBe(6);
     await thirdWriter.write(chunk(0, [9]));
     thirdWriter.releaseLock();
     await third.discard();
-    expect(session.getMemoryReservation().reservedBytes).toBe(2);
+    expect(session.getMemoryReservation().reservedBytes).toBe(0);
 
     await session.dispose();
     expect(session.getMemoryReservation().reservedBytes).toBe(0);
   });
 
-  it('rejects Blob completion without aggregate copy headroom and leaks no reservation', async () => {
+  it('recomputes default sequential capacity while an artifact remains retained', async () => {
+    vi.stubGlobal('navigator', {});
+    const session = createAudioTranscoderOutputSession({
+      memoryLimitBytes: 16,
+    });
+
+    const first = await session.create();
+    expect(first.maxOutputBytes).toBe(8);
+    const firstWriter = first.stream.getWriter();
+    await firstWriter.write(chunk(0, [1]));
+    await firstWriter.close();
+    firstWriter.releaseLock();
+    const retainedArtifact = await first.complete({
+      mimeType: 'audio/test',
+      name: 'first.test',
+    });
+    expect(session.getMemoryReservation().reservedBytes).toBe(1);
+
+    const second = await session.create();
+    expect(second.maxOutputBytes).toBe(7);
+    expect(session.getMemoryReservation().reservedBytes).toBe(15);
+    await second.discard();
+    expect(session.getMemoryReservation().reservedBytes).toBe(1);
+
+    await retainedArtifact.dispose();
+    expect(session.getMemoryReservation().reservedBytes).toBe(0);
+    await session.dispose();
+  });
+
+  it('supports multiple explicit nonzero memory artifact leases', async () => {
+    vi.stubGlobal('navigator', {});
+    const session = createAudioTranscoderOutputSession({
+      memoryLimitBytes: 12,
+    });
+
+    const first = await session.create({ maxMemoryArtifactBytes: 2 });
+    const second = await session.create({ maxMemoryArtifactBytes: 2 });
+    const third = await session.create({ maxMemoryArtifactBytes: 2 });
+
+    expect([
+      first.maxOutputBytes,
+      second.maxOutputBytes,
+      third.maxOutputBytes,
+    ]).toEqual([2, 2, 2]);
+    expect(session.getMemoryReservation().reservedBytes).toBe(12);
+    await expect(
+      session.create({ maxMemoryArtifactBytes: 1 }),
+    ).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      reason: 'output-storage-limit',
+    });
+
+    await Promise.all([first.discard(), second.discard(), third.discard()]);
+    expect(session.getMemoryReservation().reservedBytes).toBe(0);
+    await session.dispose();
+  });
+
+  it('rejects writes beyond leased Blob headroom and releases the reservation', async () => {
     vi.stubGlobal('navigator', {});
     const session = createAudioTranscoderOutputSession({ memoryLimitBytes: 8 });
     const pending = await session.create();
+    expect(pending.maxOutputBytes).toBe(4);
     const writer = pending.stream.getWriter();
-    await writer.write(chunk(0, [1, 2, 3, 4, 5]));
-    await writer.close();
-    writer.releaseLock();
-
-    expect(session.getMemoryReservation().reservedBytes).toBe(5);
-    await expect(
-      pending.complete({ mimeType: 'audio/test', name: 'too-large.test' }),
-    ).rejects.toMatchObject({
+    await expect(writer.write(chunk(0, [1, 2, 3, 4, 5]))).rejects.toMatchObject({
       code: 'RESOURCE_LIMIT_EXCEEDED',
       message:
-        'Session memory budget exceeded: 5 bytes reserved, 5 requested, 8 limit.',
+        'Memory output exceeds its reserved artifact capacity (4 bytes; attempted end: 5 bytes).',
+      reason: 'output-storage-limit',
     });
+    writer.releaseLock();
+    await pending.discard();
     expect(session.getMemoryReservation().reservedBytes).toBe(0);
 
     const replacement = await session.create();
+    expect(replacement.maxOutputBytes).toBe(4);
     const replacementWriter = replacement.stream.getWriter();
-    await replacementWriter.write(chunk(0, [1, 2, 3, 4, 5, 6, 7, 8]));
+    await replacementWriter.write(chunk(0, [1, 2, 3, 4]));
     replacementWriter.releaseLock();
     await replacement.discard();
+    expect(session.getMemoryReservation().reservedBytes).toBe(0);
+    await session.dispose();
+  });
+
+  it('accounts for page rounding when guaranteeing a memory artifact size', async () => {
+    vi.stubGlobal('navigator', {});
+    const session = createAudioTranscoderOutputSession({
+      memoryLimitBytes: 1022,
+    });
+
+    const pending = await session.create();
+
+    expect(pending.maxOutputBytes).toBe(510);
+    expect(session.getMemoryReservation()).toEqual({
+      limitBytes: 1022,
+      reservedBytes: 1020,
+    });
+    const writer = pending.stream.getWriter();
+    await writer.write(chunk(509, [1]));
+    await expect(writer.write(chunk(510, [2]))).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      reason: 'output-storage-limit',
+    });
+    writer.releaseLock();
+    await pending.discard();
     expect(session.getMemoryReservation().reservedBytes).toBe(0);
     await session.dispose();
   });
@@ -235,6 +384,7 @@ describe('paged memory fallback', () => {
     vi.stubGlobal('navigator', {});
     const session = createAudioTranscoderOutputSession({ memoryLimitBytes: 4 });
     const pending = await session.create();
+    expect(pending.maxOutputBytes).toBe(2);
     const writer = pending.stream.getWriter();
     await writer.write(chunk(0, [1, 2]));
     await writer.close();
@@ -255,10 +405,64 @@ describe('paged memory fallback', () => {
     await session.dispose();
   });
 
+  it.each([
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['NaN', Number.NaN],
+    ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+    ['oversized', 3],
+  ])(
+    'rejects a %s materialized Blob size without corrupting reservations',
+    async (_label, artifactBytes) => {
+      vi.stubGlobal('navigator', {});
+      vi.stubGlobal(
+        'Response',
+        class {
+          async blob(): Promise<Blob> {
+            return {
+              size: 1,
+              slice: () => ({ size: artifactBytes }),
+            } as unknown as Blob;
+          }
+        } as unknown as typeof Response,
+      );
+      const session = createAudioTranscoderOutputSession({
+        memoryLimitBytes: 4,
+      });
+      const pending = await session.create({
+        maxMemoryArtifactBytes: 2,
+      });
+      const writer = pending.stream.getWriter();
+      await writer.write(chunk(0, [1]));
+      await writer.close();
+      writer.releaseLock();
+
+      await expect(
+        pending.complete({
+          mimeType: 'audio/test',
+          name: 'invalid-size.test',
+        }),
+      ).rejects.toMatchObject({
+        code: 'RESOURCE_LIMIT_EXCEEDED',
+        reason: 'output-storage-limit',
+      });
+      expect(session.getMemoryReservation().reservedBytes).toBe(0);
+
+      const replacement = await session.create({
+        maxMemoryArtifactBytes: 2,
+      });
+      expect(session.getMemoryReservation().reservedBytes).toBe(4);
+      await replacement.discard();
+      expect(session.getMemoryReservation().reservedBytes).toBe(0);
+      await session.dispose();
+    },
+  );
+
   it('treats zero-byte positional writes as accounting no-ops', async () => {
     vi.stubGlobal('navigator', {});
     const session = createAudioTranscoderOutputSession({ memoryLimitBytes: 1 });
     const pending = await session.create();
+    expect(pending.maxOutputBytes).toBe(0);
     const writer = pending.stream.getWriter();
     await writer.write(chunk(Number.MAX_SAFE_INTEGER, []));
     expect(session.getMemoryReservation().reservedBytes).toBe(0);
@@ -483,7 +687,9 @@ describe('OPFS storage and ownership', () => {
       version: 1,
     });
 
-    const pending = await session.create();
+    const pending = await session.create({ maxMemoryArtifactBytes: 1 });
+    expect(pending.maxOutputBytes).toBeUndefined();
+    expect(session.getMemoryReservation().reservedBytes).toBe(0);
     const writer = pending.stream.getWriter();
     await writer.write(chunk(0, [1, 2]));
     await writer.write(chunk(1, [9]));
@@ -599,6 +805,115 @@ describe('OPFS storage and ownership', () => {
     expect(directory.outputNames()).toEqual([]);
   });
 
+  it('normalizes OPFS quota failures during writes and still removes output', async () => {
+    const directory = new FakeDirectory('write-quota');
+    const destination = await createOpfsDestination(directory.handle);
+    const outputName = directory.outputNames()[0];
+    if (outputName === undefined) {
+      throw new Error('Missing test output');
+    }
+    directory.file(outputName).failWrite = namedError('QuotaExceededError');
+    const writer = destination.stream.getWriter();
+
+    await expect(writer.write(chunk(0, [1]))).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      message:
+        'OPFS output storage quota was exceeded during destination write.',
+      reason: 'output-storage-limit',
+    });
+    writer.releaseLock();
+    await destination.discard();
+    expect(directory.outputNames()).toEqual([]);
+  });
+
+  it('converges close-quota cleanup and releases session tracking', async () => {
+    const { parent } = installOpfs('close-quota');
+    const session = createAudioTranscoderOutputSession({
+      namespace: 'close-quota',
+    });
+    const pending = await session.create();
+    const directory = parent.directory(timestampedName(NOW, UUID));
+    const outputName = directory.outputNames()[0];
+    if (outputName === undefined) {
+      throw new Error('Missing test output');
+    }
+    directory.file(outputName).failClose = namedError('QuotaExceededError');
+    const writer = pending.stream.getWriter();
+
+    await expect(writer.close()).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      message:
+        'OPFS output storage quota was exceeded during destination close.',
+      reason: 'output-storage-limit',
+    });
+    writer.releaseLock();
+    await pending.discard();
+    expect(pending.discard()).toBe(pending.discard());
+    expect(directory.outputNames()).toEqual([]);
+    await session.dispose();
+    expect(parent.names()).toEqual([]);
+  });
+
+  it('retries real removal failures after a close quota failure', async () => {
+    const { parent } = installOpfs('quota-remove-retry', (directory) => {
+      directory.outputRemovalError = new Error('remove still failed');
+    });
+    const session = createAudioTranscoderOutputSession({
+      namespace: 'quota-remove-retry',
+    });
+    const pending = await session.create();
+    const directory = parent.directory(timestampedName(NOW, UUID));
+    const outputName = directory.outputNames()[0];
+    if (outputName === undefined) {
+      throw new Error('Missing test output');
+    }
+    directory.file(outputName).failClose = namedError('QuotaExceededError');
+    const writer = pending.stream.getWriter();
+
+    await expect(writer.close()).rejects.toMatchObject({
+      code: 'RESOURCE_LIMIT_EXCEEDED',
+      reason: 'output-storage-limit',
+    });
+    writer.releaseLock();
+    await expect(pending.discard()).rejects.toThrow('remove still failed');
+    expect(directory.outputRemovalAttempts).toBe(1);
+
+    directory.outputRemovalError = undefined;
+    await pending.discard();
+    expect(directory.outputRemovalAttempts).toBe(2);
+    await session.dispose();
+    expect(parent.names()).toEqual([]);
+  });
+
+  it('preserves non-quota OPFS write and close failures while cleanup converges', async () => {
+    const writeDirectory = new FakeDirectory('write-failure');
+    const writeDestination = await createOpfsDestination(writeDirectory.handle);
+    const writeName = writeDirectory.outputNames()[0];
+    if (writeName === undefined) {
+      throw new Error('Missing test output');
+    }
+    const writeFailure = new Error('write failed');
+    writeDirectory.file(writeName).failWrite = writeFailure;
+    const writeWriter = writeDestination.stream.getWriter();
+    await expect(writeWriter.write(chunk(0, [1]))).rejects.toBe(writeFailure);
+    writeWriter.releaseLock();
+    await writeDestination.discard();
+
+    const closeDirectory = new FakeDirectory('close-failure');
+    const closeDestination = await createOpfsDestination(closeDirectory.handle);
+    const closeName = closeDirectory.outputNames()[0];
+    if (closeName === undefined) {
+      throw new Error('Missing test output');
+    }
+    const closeFailure = new Error('close failed');
+    closeDirectory.file(closeName).failClose = closeFailure;
+    const closeWriter = closeDestination.stream.getWriter();
+    await expect(closeWriter.close()).rejects.toBe(closeFailure);
+    closeWriter.releaseLock();
+    await closeDestination.discard();
+    expect(closeDirectory.outputNames()).toEqual([]);
+  });
+
   it('retries a tracked pending cleanup during session disposal', async () => {
     const { parent } = installOpfs('pending-session-retry', (directory) => {
       directory.outputRemovalError = new Error('pending remove failed');
@@ -651,9 +966,10 @@ describe('OPFS storage and ownership', () => {
       memoryLimitBytes: 8,
       namespace: 'partial-output',
     });
-    const pending = await session.create();
+    const pending = await session.create({ maxMemoryArtifactBytes: 2 });
 
     expect(pending.storage).toBe('memory');
+    expect(pending.maxOutputBytes).toBe(2);
     expect(await session.getStorageMode()).toBe('memory');
     expect(parent.directory(timestampedName(NOW, UUID)).outputNames()).toEqual([]);
     await pending.discard();
@@ -1015,7 +1331,7 @@ describe('disposal races and failures', () => {
     });
   });
 
-  it('aggregates native abort and output removal failures', async () => {
+  it('reports an actual output removal failure after a native abort failure', async () => {
     const { parent } = installOpfs('discard-fail', (directory) => {
       directory.outputAbortError = new Error('abort failed');
       directory.outputRemovalError = new Error('remove failed');
@@ -1025,7 +1341,7 @@ describe('disposal races and failures', () => {
     });
     await session.create();
 
-    await expect(session.dispose()).rejects.toBeInstanceOf(AggregateError);
+    await expect(session.dispose()).rejects.toThrow('remove failed');
     expect(parent.names()).toEqual([]);
   });
 });
@@ -1294,6 +1610,7 @@ class FakeFile {
   failAbort: Error | undefined;
   failClose: Error | undefined;
   failCreateWritable = false;
+  failWrite: Error | undefined;
   getFileError: Error | undefined;
   getFileGate: Promise<void> | undefined;
   mimeType = '';
@@ -1334,6 +1651,9 @@ class FakeFile {
   }
 
   async applyWrite(data: FileSystemWriteChunkType): Promise<void> {
+    if (this.failWrite !== undefined) {
+      throw this.failWrite;
+    }
     if (typeof data === 'string') {
       this.bytes = new Uint8Array(new TextEncoder().encode(data));
       return;

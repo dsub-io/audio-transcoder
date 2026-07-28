@@ -3,9 +3,11 @@ import type {
   AudioTranscoderOutputSession,
   AudioTranscoderOutputStorage,
   AudioTranscoderPendingOutput,
+  CreateAudioTranscoderPendingOutputOptions,
 } from '../output-session.js';
 import {
   collectFailures,
+  invalidConfiguration,
   sessionDisposedError,
   throwCollectedFailures,
   type OutputDestination,
@@ -87,11 +89,19 @@ export class DefaultOutputSession implements AudioTranscoderOutputSession {
     }
   }
 
-  create(): Promise<AudioTranscoderPendingOutput> {
+  create(
+    options: CreateAudioTranscoderPendingOutputOptions = {},
+  ): Promise<AudioTranscoderPendingOutput> {
     if (this.state !== 'active') {
       return Promise.reject(sessionDisposedError());
     }
-    const creation = this.createOutput();
+    let maxMemoryArtifactBytes: number | undefined;
+    try {
+      maxMemoryArtifactBytes = validateCreateOptions(options);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const creation = this.createOutput(maxMemoryArtifactBytes);
     this.creations.add(creation);
     void creation.then(
       () => this.creations.delete(creation),
@@ -124,7 +134,9 @@ export class DefaultOutputSession implements AudioTranscoderOutputSession {
     return this.memoryBudget.snapshot();
   }
 
-  private async createOutput(): Promise<AudioTranscoderPendingOutput> {
+  private async createOutput(
+    maxMemoryArtifactBytes: number | undefined,
+  ): Promise<AudioTranscoderPendingOutput> {
     await this.initialize();
     if (this.state !== 'active') {
       throw sessionDisposedError();
@@ -136,10 +148,16 @@ export class DefaultOutputSession implements AudioTranscoderOutputSession {
         destination = await createOpfsDestination(this.sessionDirectory);
       } catch {
         this.mode = 'memory';
-        destination = createMemoryDestination(this.memoryBudget);
+        destination = createMemoryDestination(
+          this.memoryBudget,
+          maxMemoryArtifactBytes,
+        );
       }
     } else {
-      destination = createMemoryDestination(this.memoryBudget);
+      destination = createMemoryDestination(
+        this.memoryBudget,
+        maxMemoryArtifactBytes,
+      );
     }
 
     if (this.state !== 'active') {
@@ -367,6 +385,24 @@ export class DefaultOutputSession implements AudioTranscoderOutputSession {
       return callbackRan;
     }
   }
+}
+
+function validateCreateOptions(
+  options: CreateAudioTranscoderPendingOutputOptions,
+): number | undefined {
+  if (options === null || typeof options !== 'object') {
+    throw invalidConfiguration('Output creation options must be an object.');
+  }
+  const value = options.maxMemoryArtifactBytes;
+  if (
+    value !== undefined &&
+    (!Number.isSafeInteger(value) || value < 0)
+  ) {
+    throw invalidConfiguration(
+      'maxMemoryArtifactBytes must be a non-negative safe integer.',
+    );
+  }
+  return value;
 }
 
 function getOriginPrivateStorage(): OriginPrivateStorage | undefined {
