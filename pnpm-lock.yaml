@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  '@types/dom-webcodecs@0.1.13': 515def00b47b46578b49043120b8a0828f64345f53cb085dc3594624872e0590
+
 importers:
 
   .:
@@ -980,9 +983,9 @@ snapshots:
 
   '@types/dom-mediacapture-transform@0.1.12':
     dependencies:
-      '@types/dom-webcodecs': 0.1.13
+      '@types/dom-webcodecs': 0.1.13(patch_hash=515def00b47b46578b49043120b8a0828f64345f53cb085dc3594624872e0590)
 
-  '@types/dom-webcodecs@0.1.13': {}
+  '@types/dom-webcodecs@0.1.13(patch_hash=515def00b47b46578b49043120b8a0828f64345f53cb085dc3594624872e0590)': {}
 
   '@types/estree@1.0.9': {}
 
@@ -1324,7 +1327,7 @@ snapshots:
   mediabunny@1.50.9:
     dependencies:
       '@types/dom-mediacapture-transform': 0.1.12
-      '@types/dom-webcodecs': 0.1.13
+      '@types/dom-webcodecs': 0.1.13(patch_hash=515def00b47b46578b49043120b8a0828f64345f53cb085dc3594624872e0590)
 
   merge-stream@2.0.0: {}
 

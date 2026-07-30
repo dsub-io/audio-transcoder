@@ -91,9 +91,20 @@ jobs:
 
       - name: Publish the engine package with npm OIDC
         run: |
+          set -euo pipefail
           version=$(node --print "require('./package.json').version")
-          if [ "$(npm view "@dsub/audio-transcoder@${version}" version 2>/dev/null || true)" = "${version}" ]; then
+          lookup_error="${RUNNER_TEMP}/audio-transcoder-npm-view-error.log"
+          set +e
+          published_version="$(npm view "@dsub/audio-transcoder@${version}" version 2>"${lookup_error}")"
+          lookup_status=$?
+          set -e
+
+          if [ "${lookup_status}" -eq 0 ] && [ "${published_version}" = "${version}" ]; then
             echo "@dsub/audio-transcoder@${version} is already published."
-          else
+          elif [ "${lookup_status}" -ne 0 ] && grep -Eq 'E404|404 Not Found' "${lookup_error}"; then
             npm publish --access public
+          else
+            cat "${lookup_error}" >&2
+            echo "Could not establish npm publication state for @dsub/audio-transcoder@${version}." >&2
+            exit 1
           fi

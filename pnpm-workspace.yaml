@@ -1,3 +1,5 @@
 # Pinned after direct source and license review during the streaming refactor.
 minimumReleaseAgeExclude:
   - mediabunny@1.50.9
+patchedDependencies:
+  '@types/dom-webcodecs@0.1.13': patches/@types__dom-webcodecs@0.1.13.patch
