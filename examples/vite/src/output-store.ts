@@ -43,7 +43,7 @@ export async function discardPendingOutputAfterFailure(
 export class OutputStore {
   private readonly session = createAudioTranscoderOutputSession({
     memoryLimitBytes: MEMORY_OUTPUT_LIMIT_BYTES,
-    namespace: 'dsub-audio-transcoder-demo',
+    namespace: 'audio-transcoder-demo',
   });
 
   async create(): Promise<PendingOutput> {
