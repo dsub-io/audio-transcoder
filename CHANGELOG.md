@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/dsub-io/audio-transcoder/compare/v0.3.0...v0.3.1) (2026-07-30)
+
+
+### Bug Fixes
+
+* enforce declaration and release validation ([#22](https://github.com/dsub-io/audio-transcoder/issues/22)) ([44c9f13](https://github.com/dsub-io/audio-transcoder/commit/44c9f1341fc7605a3a24eba66f182997fe9421e0))
+
 ## [0.3.0](https://github.com/dsub-io/audio-transcoder/compare/v0.2.0...v0.3.0) (2026-07-28)
 
 
