@@ -85,6 +85,36 @@ afterEach(() => {
 });
 
 describe('stream worker client', () => {
+  it('passes a serializable HTTP input descriptor across the Worker boundary', async () => {
+    const worker = new WorkerStub();
+    const engine = createEngine(worker);
+    const input = {
+      http: {
+        credentials: 'include' as const,
+        headers: { Authorization: 'Bearer source-ticket' },
+        size: 12_345,
+        url: 'https://www.dsub.io/api/tools/youtube-audio/source',
+      },
+      name: 'source.m4a',
+    };
+    const result = engine.inspect(input);
+
+    expect(worker.posts).toEqual([
+      {
+        message: {
+          id: 1,
+          input,
+          options: {},
+          type: 'inspect',
+        },
+        transfer: [],
+      },
+    ]);
+    worker.emit({ id: 1, operation: 'inspect', type: 'result', value: INSPECTION });
+    await expect(result).resolves.toEqual(INSPECTION);
+    await engine.dispose();
+  });
+
   it('serializes operations and transfers output only when its turn starts', async () => {
     const worker = new WorkerStub();
     const engine = createEngine(worker);

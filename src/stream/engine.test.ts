@@ -1640,6 +1640,8 @@ describe('bounded streaming engine', () => {
 
   it.each([
     undefined,
+    null,
+    {},
     { blob: new Blob() },
     { blob: 'not a Blob' },
   ])('rejects invalid streaming input %#', async (input) => {

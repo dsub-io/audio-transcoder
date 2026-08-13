@@ -108,6 +108,10 @@ export type {
 export type {
   AudioDitherMode,
   AudioResampleQuality,
+  AudioStreamBlobInput,
+  AudioStreamHttpCredentials,
+  AudioStreamHttpInput,
+  AudioStreamHttpSource,
   AudioStreamInput,
   AudioStreamInputSupportResult,
   AudioStreamInspection,

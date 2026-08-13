@@ -13,12 +13,15 @@ import type { AudioSourceEncoding } from '../engine/contracts.js';
 import type { PcmStreamSource } from './pcm-source.js';
 import { AudioTranscoderError } from '../errors.js';
 import { createOperationAbortedError } from '../engine/operation-errors.js';
-import { createBoundedBlobSource } from './runtime/bounded-blob-source.js';
+import {
+  createBoundedInputSource,
+  getAudioStreamInputSize,
+} from './runtime/bounded-blob-source.js';
 
 interface MediaProbe {
   readonly canDecode: boolean;
   readonly dispose: () => void;
-  readonly input: Input<ReturnType<typeof createBoundedBlobSource>>;
+  readonly input: Input<ReturnType<typeof createBoundedInputSource>>;
   readonly inspection: AudioStreamInspection;
   readonly track: InputAudioTrack;
 }
@@ -120,10 +123,11 @@ async function probeMediaBlob(
   throwIfAborted(signal);
   const input = new Input({
     formats: ALL_FORMATS,
-    source: createBoundedBlobSource(
-      streamInput.blob,
+    source: createBoundedInputSource(
+      streamInput,
       inputReadBytes,
       maxTotalReadBytes,
+      signal,
     ),
   });
   let disposed = false;
@@ -184,7 +188,7 @@ async function probeMediaBlob(
       durationSeconds,
       notes: canDecode ? [] : ['A browser decoder or codec plugin is required.'],
       sampleRate,
-      size: streamInput.blob.size,
+      size: getAudioStreamInputSize(streamInput),
       sourceEncoding,
     });
     return { canDecode, dispose, input, inspection, track };

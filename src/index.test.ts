@@ -27,6 +27,11 @@ import {
   type AudioStreamRuntimeAssetOutputFormatDescriptor,
   type AudioStreamInputFormatDescriptor,
   type AudioStreamInputFormatId,
+  type AudioStreamBlobInput,
+  type AudioStreamHttpCredentials,
+  type AudioStreamHttpInput,
+  type AudioStreamHttpSource,
+  type AudioStreamInput,
   type AudioStreamInputSupportResult,
   type AudioStreamIntegerOutputPresetId,
   type AudioStreamLosslessOutputPresetDescriptor,
@@ -135,6 +140,18 @@ describe('public package metadata', () => {
 
 describe('public stream type surface', () => {
   it('exports discovery, probe, target, and format-specific result contracts', () => {
+    expectTypeOf<AudioStreamInput>().toMatchTypeOf<
+      AudioStreamBlobInput | AudioStreamHttpInput
+    >();
+    expectTypeOf<AudioStreamHttpCredentials>().toEqualTypeOf<
+      'include' | 'omit' | 'same-origin'
+    >();
+    expectTypeOf<AudioStreamHttpSource>().toMatchTypeOf<{
+      readonly credentials?: AudioStreamHttpCredentials;
+      readonly headers?: Readonly<Record<string, string>>;
+      readonly size: number;
+      readonly url: string;
+    }>();
     expectTypeOf<AudioStreamInputFormatId>().toMatchTypeOf<string>();
     expectTypeOf<AudioStreamInputFormatDescriptor>().toMatchTypeOf<
       | AudioStreamBuiltInInputFormatDescriptor

@@ -1,9 +1,11 @@
 # Browser integration
 
 `@dsub/audio-transcoder` performs audio work in the browser. A module Web Worker
-keeps codec work off the UI thread; it is not a server backend. The package
-makes no media-upload requests, and no ffmpeg installation is required. It is
-licensed for noncommercial use under
+keeps codec work off the UI thread; it is not a server backend. Local `Blob` and
+`File` inputs are never uploaded. An explicit HTTP input may fetch bounded byte
+ranges from a consumer-owned endpoint; the package does not resolve media or
+provide a proxy. No ffmpeg installation is required. It is licensed for
+noncommercial use under
 [PolyForm Noncommercial 1.0.0](../LICENSE.md).
 
 Start with the complete [Quick Start](../README.md#quick-start). The sections
@@ -84,6 +86,23 @@ release writer locks; only then should `outputSession.dispose()` remove OPFS
 entries. Both methods are idempotent. `terminate()` remains available on a
 stream Worker or pool as fire-and-forget compatibility, but it is not a
 completion barrier.
+
+## Remote input ownership
+
+The application may pass `{ http: { url, size } }` instead of `{ blob }` to
+`probeInputSupport()`, `inspect()`, and `transcode()`. This descriptor is plain
+data and is posted to the module Worker. The Worker issues bounded `GET`
+requests with its own `Range` header; partial responses must be exact `206`
+responses with `Content-Range`. Optional `credentials` defaults to
+`same-origin`, and optional headers must contain only serializable string
+values.
+
+Keep acquisition and authorization outside this package. A production media
+integration should resolve the upstream source on the server, bind an opaque
+short-lived ticket to the signed-in user, and expose only an authenticated
+range endpoint. Never accept an arbitrary client-provided upstream URL in that
+endpoint. If the range source is cross-origin, configure CORS for the Worker
+origin and `Range`; a same-origin endpoint avoids that additional boundary.
 
 ## Codec asset source and loading state
 
