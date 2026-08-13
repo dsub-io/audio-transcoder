@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/dsub-io/audio-transcoder/compare/v0.3.1...v0.4.0) (2026-08-13)
+
+
+### Features
+
+* support HTTP range audio inputs ([#25](https://github.com/dsub-io/audio-transcoder/issues/25)) ([5fd08ba](https://github.com/dsub-io/audio-transcoder/commit/5fd08ba5abe4d21f4bcfd27dfe54f975ed1283b1))
+
 ## [0.3.1](https://github.com/dsub-io/audio-transcoder/compare/v0.3.0...v0.3.1) (2026-07-30)
 
 
