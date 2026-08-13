@@ -51,6 +51,7 @@ import {
   cleanupOperationResultAfterAbort,
   raceWithOperationAbort,
 } from './abortable-operation.js';
+import { getAudioStreamInputSize } from './runtime/bounded-blob-source.js';
 
 const MAX_UINT32 = 0xffff_ffff;
 const RIFF_MAX_OUTPUT_BYTES = MAX_UINT32;
@@ -107,7 +108,7 @@ export function createAudioTranscoderStreamEngine(
       if (inspection !== null) {
         return freezeInspection(inspection);
       }
-      return unknownInspection(input.blob.size);
+      return unknownInspection(getAudioStreamInputSize(input));
     },
     async probeInputSupport(
       input,
@@ -787,7 +788,9 @@ function createDither(
     return null;
   }
 
-  let state = hashSeed(`${input.name ?? ''}:${input.blob.size}`);
+  let state = hashSeed(
+    `${input.name ?? ''}:${getAudioStreamInputSize(input)}`,
+  );
   const scale = 1 / 2 ** (encoding.bitDepth - 1);
   const random = (): number => {
     state ^= state << 13;
@@ -877,10 +880,26 @@ function validateBufferSize(
 }
 
 function validateInput(input: AudioStreamInput): void {
-  if (!(input?.blob instanceof Blob) || input.blob.size === 0) {
+  if (
+    input === null ||
+    typeof input !== 'object' ||
+    (!('blob' in input) && !('http' in input))
+  ) {
     throw new AudioTranscoderError(
       'INVALID_AUDIO_DATA',
-      'Streaming input must contain a non-empty Blob.',
+      'Streaming input must contain a non-empty Blob or HTTP range source.',
+    );
+  }
+  if ('blob' in input && !(input.blob instanceof Blob)) {
+    throw new AudioTranscoderError(
+      'INVALID_AUDIO_DATA',
+      'Streaming input must contain a non-empty Blob or HTTP range source.',
+    );
+  }
+  if (getAudioStreamInputSize(input) === 0) {
+    throw new AudioTranscoderError(
+      'INVALID_AUDIO_DATA',
+      'Streaming input must contain a non-empty Blob or HTTP range source.',
     );
   }
 }

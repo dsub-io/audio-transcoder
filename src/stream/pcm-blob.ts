@@ -12,6 +12,10 @@ import {
   readInt64BE,
 } from '../codecs/binary.js';
 import { readPcmSample } from '../codecs/pcm.js';
+import {
+  getAudioStreamInputSize,
+  readAudioStreamInputRange,
+} from './runtime/bounded-blob-source.js';
 
 const PCM_CHUNK_FRAMES = 16_384;
 const MAX_CHANNELS = 32;
@@ -54,8 +58,10 @@ export async function inspectCustomPcmBlob(
   input: AudioStreamInput,
   signal?: AbortSignal,
 ): Promise<AudioStreamInspection | null> {
-  const parsed = await parseCustomPcmBlob(input.blob, signal);
-  return parsed === null ? null : toInspection(parsed, input.blob.size);
+  const parsed = await parseCustomPcmInput(input, signal);
+  return parsed === null
+    ? null
+    : toInspection(parsed, getAudioStreamInputSize(input));
 }
 
 export async function openCustomPcmBlobSource(
@@ -66,7 +72,7 @@ export async function openCustomPcmBlobSource(
 ): Promise<PcmStreamSource | null> {
   assertPositiveChunkLimit(inputReadBytes, 'inputReadBytes');
   assertPositiveChunkLimit(pcmChunkBytes, 'pcmChunkBytes');
-  const parsed = await parseCustomPcmBlob(input.blob, signal);
+  const parsed = await parseCustomPcmInput(input, signal);
   if (parsed === null) {
     return null;
   }
@@ -83,7 +89,7 @@ export async function openCustomPcmBlobSource(
     pcmChunkBytes,
   );
 
-  const inspection = toInspection(pcm, input.blob.size);
+  const inspection = toInspection(pcm, getAudioStreamInputSize(input));
   return {
     channels: pcm.channels,
     close(): void {},
@@ -99,8 +105,8 @@ export async function openCustomPcmBlobSource(
           framesPerChunk,
           pcm.totalFrames - startFrame,
         );
-        const bytes = await readBlobRange(
-          input.blob,
+        const bytes = await readInputRange(
+          input,
           pcm.dataOffset + startFrame * pcm.bytesPerFrame,
           frames * pcm.bytesPerFrame,
           chunkSignal,
@@ -164,51 +170,53 @@ function assertPositiveChunkLimit(value: number, name: string): void {
   }
 }
 
-async function parseCustomPcmBlob(
-  blob: Blob,
+async function parseCustomPcmInput(
+  input: AudioStreamInput,
   signal?: AbortSignal,
 ): Promise<ParsedPcmBlob | null> {
-  if (blob.size < 12) {
+  const size = getAudioStreamInputSize(input);
+  if (size < 12) {
     return null;
   }
-  const header = new DataView(await readBlobRange(blob, 0, 12, signal));
+  const header = new DataView(await readInputRange(input, 0, 12, signal));
   if (readAscii(header, 0, 4) === 'caff') {
-    return parseCaf(blob, signal);
+    return parseCaf(input, signal);
   }
   const formType = readAscii(header, 8, 4);
   if (
     readAscii(header, 0, 4) === 'FORM' &&
     (formType === 'AIFF' || formType === 'AIFC')
   ) {
-    return parseAiff(blob, formType, signal);
+    return parseAiff(input, formType, signal);
   }
   return null;
 }
 
 async function parseCaf(
-  blob: Blob,
+  input: AudioStreamInput,
   signal?: AbortSignal,
 ): Promise<ParsedPcmBlob> {
+  const size = getAudioStreamInputSize(input);
   let offset = 8;
   let description: ParsedPcmDescription | undefined;
 
-  while (offset + 12 <= blob.size) {
+  while (offset + 12 <= size) {
     const header = new DataView(
-      await readBlobRange(blob, offset, 12, signal),
+      await readInputRange(input, offset, 12, signal),
     );
     const chunkType = readAscii(header, 0, 4);
     const encodedSize = readInt64BE(header, 4);
     const dataOffset = offset + 12;
     const logicalSize =
-      encodedSize === -1n ? blob.size - dataOffset : toSafeSize(encodedSize);
-    assertChunkRange(blob, dataOffset, logicalSize, 'CAF');
+      encodedSize === -1n ? size - dataOffset : toSafeSize(encodedSize);
+    assertChunkRange(size, dataOffset, logicalSize, 'CAF');
 
     if (chunkType === 'desc') {
       if (logicalSize < 32) {
         throw invalidAudio('CAF desc chunk is too small.');
       }
       const view = new DataView(
-        await readBlobRange(blob, dataOffset, 32, signal),
+        await readInputRange(input, dataOffset, 32, signal),
       );
       const flags = view.getUint32(12, false);
       const bitDepth = view.getUint32(28, false);
@@ -311,21 +319,22 @@ async function parseCaf(
 }
 
 async function parseAiff(
-  blob: Blob,
+  input: AudioStreamInput,
   formType: 'AIFC' | 'AIFF',
   signal?: AbortSignal,
 ): Promise<ParsedPcmBlob> {
+  const size = getAudioStreamInputSize(input);
   let offset = 12;
   let common: AiffCommon | undefined;
 
-  while (offset + 8 <= blob.size) {
+  while (offset + 8 <= size) {
     const header = new DataView(
-      await readBlobRange(blob, offset, 8, signal),
+      await readInputRange(input, offset, 8, signal),
     );
     const chunkId = readAscii(header, 0, 4);
     const chunkSize = header.getUint32(4, false);
     const dataOffset = offset + 8;
-    assertChunkRange(blob, dataOffset, chunkSize, formType);
+    assertChunkRange(size, dataOffset, chunkSize, formType);
 
     if (chunkId === 'COMM') {
       if (chunkSize < 18) {
@@ -333,7 +342,7 @@ async function parseAiff(
       }
       const bytesToRead = formType === 'AIFC' ? Math.min(22, chunkSize) : 18;
       const view = new DataView(
-        await readBlobRange(blob, dataOffset, bytesToRead, signal),
+        await readInputRange(input, dataOffset, bytesToRead, signal),
       );
       const bitDepth = view.getUint16(6, false);
       const channels = view.getUint16(0, false);
@@ -379,7 +388,7 @@ async function parseAiff(
         throw invalidAudio(`${formType} SSND chunk is too small.`);
       }
       const soundHeader = new DataView(
-        await readBlobRange(blob, dataOffset, 8, signal),
+        await readInputRange(input, dataOffset, 8, signal),
       );
       const soundOffset = soundHeader.getUint32(0, false);
       if (soundOffset > chunkSize - 8) {
@@ -592,7 +601,7 @@ function validateBasicAudioParameters(
 }
 
 function assertChunkRange(
-  blob: Blob,
+  sourceSize: number,
   offset: number,
   size: number,
   container: string,
@@ -601,7 +610,7 @@ function assertChunkRange(
     !Number.isSafeInteger(size) ||
     size < 0 ||
     !Number.isSafeInteger(offset + size) ||
-    offset + size > blob.size
+    offset + size > sourceSize
   ) {
     throw invalidAudio(`${container} chunk exceeds the source file.`);
   }
@@ -620,28 +629,45 @@ function toSafeSize(value: bigint): number {
   return Number(value);
 }
 
-async function readBlobRange(
-  blob: Blob,
+async function readInputRange(
+  input: AudioStreamInput,
   offset: number,
   size: number,
   signal?: AbortSignal,
 ): Promise<ArrayBuffer> {
   throwIfAborted(signal);
+  const blob = 'blob' in input && input.blob instanceof Blob
+    ? input.blob
+    : undefined;
+  const inputSize = blob?.size ?? getAudioStreamInputSize(input);
   if (
     !Number.isSafeInteger(offset) ||
     !Number.isSafeInteger(size) ||
     offset < 0 ||
     size < 0 ||
-    offset + size > blob.size
+    offset + size > inputSize
   ) {
     throw invalidAudio('Requested audio byte range is outside the source file.');
   }
-  const bytes = await blob.slice(offset, offset + size).arrayBuffer();
+  if (blob !== undefined) {
+    const bytes = await blob.slice(offset, offset + size).arrayBuffer();
+    throwIfAborted(signal);
+    if (bytes.byteLength !== size) {
+      throw invalidAudio('The browser returned a truncated audio byte range.');
+    }
+    return bytes;
+  }
+  const bytes = await readAudioStreamInputRange(
+    input,
+    offset,
+    offset + size,
+    signal,
+  );
   throwIfAborted(signal);
   if (bytes.byteLength !== size) {
     throw invalidAudio('The browser returned a truncated audio byte range.');
   }
-  return bytes;
+  return bytes.buffer;
 }
 
 function throwIfAborted(signal?: AbortSignal): void {

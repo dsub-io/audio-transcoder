@@ -10,11 +10,35 @@ import type {
   AudioTranscoderStreamCapabilities,
 } from './capabilities.js';
 
-export interface AudioStreamInput {
+export interface AudioStreamBlobInput {
   /** Browser-local source. `File` is supported because it extends `Blob`. */
   readonly blob: Blob;
   readonly name?: string;
+  readonly http?: never;
 }
+
+export type AudioStreamHttpCredentials = 'include' | 'omit' | 'same-origin';
+
+export interface AudioStreamHttpSource {
+  /** Fetch credentials mode. Defaults to `same-origin`. */
+  readonly credentials?: AudioStreamHttpCredentials;
+  /** Optional serializable request headers. `Range` is owned by the engine. */
+  readonly headers?: Readonly<Record<string, string>>;
+  /** Exact source size used for bounded random-access reads. */
+  readonly size: number;
+  /** Absolute HTTP(S) URL that must support byte-range requests. */
+  readonly url: string;
+}
+
+export interface AudioStreamHttpInput {
+  readonly blob?: never;
+  /** Consumer-owned HTTP source. The engine only requests bounded byte ranges. */
+  readonly http: AudioStreamHttpSource;
+  readonly name?: string;
+}
+
+/** Browser-local Blob/File input or a serializable HTTP byte-range source. */
+export type AudioStreamInput = AudioStreamBlobInput | AudioStreamHttpInput;
 
 export type AudioStreamOutputPresetId = AudioStreamOutputPreset['id'];
 

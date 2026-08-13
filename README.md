@@ -1,10 +1,11 @@
 # dsub audio transcoder
 
-Browser-local audio inspection and transcoding engine for dsub tools. The
-package makes no media-upload requests: codec work runs in module Web Workers,
-and files stay on the user's device unless the consumer application sends them
-elsewhere. Lazy raw WebAssembly is fetched only from the asset source that the
-host application explicitly configures; the package never selects a CDN.
+Browser-local audio inspection and transcoding engine for dsub tools. Codec
+work runs in module Web Workers. Local `Blob` and `File` inputs are never
+uploaded; an explicit HTTP input instead lets the Worker fetch bounded byte
+ranges from a consumer-owned source. Lazy raw WebAssembly is fetched only from
+the asset source that the host application explicitly configures; the package
+never selects a CDN.
 
 > Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE.md).
 > Commercial use is not permitted by this package license.
@@ -244,10 +245,44 @@ smoke test. Framework lifecycle and deployment details are in
 
 ## Streaming API
 
-Use the streaming Worker API for production transcoding. It reads `Blob` or
-`File` input in bounded chunks and writes random-access output chunks instead
-of materializing the complete input, decoded PCM, and output in JavaScript
-memory at once.
+Use the streaming Worker API for production transcoding. It reads local
+`Blob`/`File` or explicit HTTP input in bounded chunks and writes random-access
+output chunks instead of materializing the complete input, decoded PCM, and
+output in JavaScript memory at once.
+
+### HTTP range input
+
+Use an HTTP descriptor when another package or application endpoint owns media
+acquisition. The descriptor is plain structured-cloneable data, so it crosses
+the existing module Worker boundary without transferring a callback:
+
+```ts
+const input = {
+  http: {
+    credentials: 'include',
+    size: resolvedSource.size,
+    url: resolvedSource.rangeUrl,
+  },
+  name: resolvedSource.fileName,
+} as const;
+
+const support = await engine.probeInputSupport(input, { signal });
+```
+
+The consumer owns URL resolution, authorization, expiry, and source lifetime.
+The URL must be absolute HTTP(S), contain no embedded credentials, and serve
+the declared byte length. Partial requests must return `206` with an exact
+`Content-Range`; a `200` response is accepted only when the Worker requested
+the complete source. The engine owns the `Range` header and rejects a caller
+override. `credentials` defaults to `same-origin`; optional headers must be a
+serializable string record. Cross-origin sources additionally need CORS to
+allow the Worker origin and the `Range` header.
+
+Prefer a same-origin authenticated range endpoint with an opaque, short-lived
+source ticket. Do not place long-lived credentials or an upstream media URL in
+the descriptor. The transcoder neither discovers remote media nor provides an
+open proxy; it only performs the bounded reads requested by its parsers and
+decoders.
 
 ### Input discovery and probing
 

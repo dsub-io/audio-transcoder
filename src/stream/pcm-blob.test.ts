@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   inspectCustomPcmBlob,
   openCustomPcmBlobSource,
@@ -6,6 +6,10 @@ import {
 
 const DEFAULT_INPUT_READ_BYTES = 8 * 1024 * 1024;
 const DEFAULT_PCM_CHUNK_BYTES = 4 * 1024 * 1024;
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('streaming custom PCM Blob parser', () => {
   it('returns null for short and unrelated files', async () => {
@@ -450,6 +454,72 @@ describe('streaming custom PCM Blob parser', () => {
     });
     expect(source?.totalFrames).toBe(1);
     expect([...chunk!]).toEqual([0.5]);
+  });
+
+  it('inspects and streams custom PCM from bounded HTTP range reads', async () => {
+    const bytes = new Uint8Array(createAiff({
+      frames: 2,
+      payload: int16Bytes([16_384, -32_768], false),
+    }));
+    const ranges: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (
+      _request: RequestInfo | URL,
+      init?: RequestInit,
+    ) => {
+      const range = new Headers(init?.headers).get('range');
+      const match = /^bytes=(\d+)-(\d+)$/.exec(range ?? '');
+      if (match === null) {
+        return new Response(null, { status: 400 });
+      }
+      const start = Number(match[1]);
+      const end = Number(match[2]);
+      ranges.push(range!);
+      return new Response(bytes.slice(start, end + 1), {
+        headers: {
+          'Content-Range': `bytes ${start}-${end}/${bytes.byteLength}`,
+        },
+        status: 206,
+      });
+    }));
+    const input = {
+      http: {
+        size: bytes.byteLength,
+        url: 'https://www.dsub.io/api/tools/youtube-audio/source',
+      },
+      name: 'remote.aiff',
+    } as const;
+
+    await expect(inspectCustomPcmBlob(input)).resolves.toMatchObject({
+      container: 'AIFF',
+      size: bytes.byteLength,
+    });
+    const source = await openCustomPcmBlobSource(
+      input,
+      DEFAULT_INPUT_READ_BYTES,
+      DEFAULT_PCM_CHUNK_BYTES,
+    );
+    const [chunk] = await collect(source!.chunks());
+
+    expect([...chunk!]).toEqual([0.5, -1]);
+    expect(ranges.length).toBeGreaterThan(2);
+    expect(ranges.every((range) => range.startsWith('bytes='))).toBe(true);
+  });
+
+  it('rejects a truncated HTTP PCM range body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(
+      new Uint8Array([1]),
+      {
+        headers: { 'Content-Range': 'bytes 0-11/12' },
+        status: 206,
+      },
+    )));
+
+    await expect(inspectCustomPcmBlob({
+      http: {
+        size: 12,
+        url: 'https://www.dsub.io/api/tools/youtube-audio/source',
+      },
+    })).rejects.toMatchObject({ code: 'INVALID_AUDIO_DATA' });
   });
 
   it('supports uncompressed AIFC and reports compressed AIFC', async () => {
