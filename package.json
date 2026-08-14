@@ -15,7 +15,7 @@
     "url": "git+https://github.com/dsub-io/audio-transcoder.git"
   },
   "engines": {
-    "node": "^22.22.0 || >=24.11.0"
+    "node": "24.19.0"
   },
   "packageManager": "pnpm@11.9.0",
   "publishConfig": {
