@@ -44,16 +44,17 @@ Illinois/NCSA Open Source License.
 - Official SDK source: [emsdk](https://github.com/emscripten-core/emsdk)
 - Full compiler license text: `THIRD_PARTY_LICENSES/EMSCRIPTEN-MIT-AND-UIUC-NCSA.txt`
 
-## MediaBunny 1.50.9
+## MediaBunny runtime 1.55.1 and encoder sources 1.50.9
 
-Applies to the installed `mediabunny` runtime and to the AAC, MP3, and FLAC
-bridge source adapted from MediaBunny `1.50.9`. The official encoder extension
-packages are provenance inputs; the dsub runtime uses its own raw-WASM bridges,
-not those packages' nested Worker distributions.
+Applies to the installed `mediabunny` runtime at `1.55.1` and to the AAC, MP3,
+and FLAC bridge source adapted from MediaBunny `1.50.9`. The official encoder
+extension packages are provenance inputs; the dsub runtime uses its own raw-WASM
+bridges, not those packages' nested Worker distributions.
 
 - Copyright: MediaBunny contributors
 - License: MPL-2.0
-- Published source revision: [794b84884f1e23cb6241689b3563190d138bbd9a](https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a)
+- Runtime source revision: [018c2ca67b728610e61fce23a2bdd23c8a2126c6](https://github.com/Vanilagy/mediabunny/tree/018c2ca67b728610e61fce23a2bdd23c8a2126c6)
+- Encoder source revision: [794b84884f1e23cb6241689b3563190d138bbd9a](https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a)
 - AAC extension source and bridge: [packages/aac-encoder](https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a/packages/aac-encoder)
 - MP3 extension source and bridge: [packages/mp3-encoder](https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a/packages/mp3-encoder)
 - FLAC extension source and bridge: [packages/flac-encoder](https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a/packages/flac-encoder)
