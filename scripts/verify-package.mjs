@@ -162,6 +162,7 @@ const requiredNoticeText = [
   'dadecff97059b0e7847990ee180517cccdbe6db3e24d4018c33904620a49730d',
   '2134656307e866675cbd502030627fa495d80ee77590ca50f29c40ce92c2d226',
   'bab40503bf0ed441421a5634b2e2c98aaad5e6b0bf663461fc5b19e779985e27',
+  'https://github.com/Vanilagy/mediabunny/tree/018c2ca67b728610e61fce23a2bdd23c8a2126c6',
   'https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a/packages/mp3-encoder',
   'https://github.com/Vanilagy/mediabunny/tree/794b84884f1e23cb6241689b3563190d138bbd9a/packages/flac-encoder',
   'https://downloads.sourceforge.net/project/lame/lame/3.100/lame-3.100.tar.gz',
@@ -225,7 +226,7 @@ const missingRequiredNoticeText = requiredNoticeText.find(
 );
 
 if (
-  packageJson.dependencies?.mediabunny !== '1.50.9' ||
+  packageJson.dependencies?.mediabunny !== '1.55.1' ||
   dependencySections.some((dependencies) =>
     forbiddenDependencies.some(
       (dependency) => dependencies?.[dependency] !== undefined,
