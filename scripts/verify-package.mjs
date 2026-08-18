@@ -239,6 +239,7 @@ if (
 }
 
 const trustedPublishSteps = [
+  'node ./scripts/verify-release-state.mjs',
   'node ./scripts/verify-published-codec-assets.mjs',
   'npm publish --access public',
 ];
@@ -252,10 +253,9 @@ const trustedPublishOrderIsValid = trustedPublishPositions.every(
 );
 
 if (
-  packageJson.scripts?.prepublishOnly !==
-    'node ./scripts/verify-release-state.mjs && pnpm codec-assets:verify-published' ||
+  packageJson.scripts?.prepublishOnly !== undefined ||
   packageJson.scripts?.['codec-assets:verify-published'] !==
-    'pnpm build && node ./scripts/verify-published-codec-assets.mjs' ||
+    'node ./scripts/verify-published-codec-assets.mjs' ||
   !releaseWorkflow.includes('id-token: write') ||
   !releaseWorkflow.includes('runs-on: ubuntu-latest') ||
   !releaseWorkflow.includes("needs.release-please.outputs.release_created == 'true'") ||

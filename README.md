@@ -235,13 +235,19 @@ may describe transport bytes while integrity covers the decoded raw WASM.
 
 ```sh
 pnpm install
-pnpm check
+pnpm generate:package-metadata
+pnpm generate:codec-asset-metadata
+pnpm typecheck
+pnpm test:coverage
+pnpm build:clean
+pnpm build
+pnpm build:copy-runtime-assets
+pnpm package:verify
 ```
 
-`pnpm check` runs strict type checking, unit tests with per-file 100% coverage,
-the production build, built-package API verification, and a package-contents
-smoke test. Framework lifecycle and deployment details are in
-[docs/integration.md](docs/integration.md).
+CI exposes type checking, framework tests, builds, package verification, codec
+asset checks, and demo checks as separate named steps. Framework lifecycle and
+deployment details are in [docs/integration.md](docs/integration.md).
 
 ## Streaming API
 
@@ -656,6 +662,12 @@ managed by the stream API.
 Release Please owns semantic versioning, changelog updates, GitHub releases, and
 package version changes. Runtime consumers can use `audioTranscoder.getVersion()`,
 `getVersion()`, or `AUDIO_TRANSCODER_VERSION`.
+
+Full CI runs once for ordinary pull requests targeting `main`; it does not run
+on `main`, Release Please pull requests, or manual dispatches. Release Please
+runs on `main` pushes and requires the repository
+`GH_PAT` secret. The browser validation matrix remains Chromium, Firefox, and
+WebKit; npm publication uses Trusted Publishing (OIDC).
 
 The engine and its `codec-assets/` tree are one exact-version release. Release
 Please owns the version, public tag, and GitHub release. The Release workflow
