@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/dsub-io/audio-transcoder/compare/v0.4.0...v0.4.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **ci:** make pull request validation explicit ([#28](https://github.com/dsub-io/audio-transcoder/issues/28)) ([f1001b6](https://github.com/dsub-io/audio-transcoder/commit/f1001b6aebfd214a7fe71eb35eea2b17ce940a63))
+
 ## [0.4.0](https://github.com/dsub-io/audio-transcoder/compare/v0.3.1...v0.4.0) (2026-08-13)
 
 
