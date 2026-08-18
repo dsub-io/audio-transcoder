@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.2](https://github.com/dsub-io/audio-transcoder/compare/v0.4.1...v0.4.2) (2026-08-18)
+
+
+### Bug Fixes
+
+* **deps:** update JavaScript dependencies ([#30](https://github.com/dsub-io/audio-transcoder/issues/30)) ([c088d64](https://github.com/dsub-io/audio-transcoder/commit/c088d64bd54f08ad62658ac3afca38ea51f253d7))
+
 ## [0.4.1](https://github.com/dsub-io/audio-transcoder/compare/v0.4.0...v0.4.1) (2026-08-18)
 
 

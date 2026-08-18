@@ -1,6 +1,6 @@
 {
   "name": "@dsub/audio-transcoder",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Browser-local audio inspection and transcoding engine for dsub tools.",
   "author": "dsub.io",
   "license": "SEE LICENSE IN LICENSE.md",
