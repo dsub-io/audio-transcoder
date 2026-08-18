@@ -99,6 +99,8 @@ jobs:
     name: Browser / ${{ matrix.browser }}
     if: ${{ !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright:v1.61.1-noble@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48
     timeout-minutes: 45
     permissions:
       contents: read
@@ -129,9 +131,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Install browser
-        run: pnpm exec playwright install ${{ matrix.browser }}
 
       - name: Generate package metadata
         run: pnpm generate:package-metadata
