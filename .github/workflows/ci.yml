@@ -154,3 +154,29 @@ jobs:
 
       - name: Run browser matrix
         run: pnpm test:browser --project=${{ matrix.browser }}
+
+  verify:
+    name: verify
+    if: always()
+    needs: [validate, browser-matrix]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Verify required CI results
+        env:
+          BROWSER_RESULT: ${{ needs.browser-matrix.result }}
+          VALIDATE_RESULT: ${{ needs.validate.result }}
+        run: |
+          if [ "${VALIDATE_RESULT}" = "success" ]; then
+            if [ "${BROWSER_RESULT}" = "success" ]; then
+              exit 0
+            fi
+          fi
+          if [ "${VALIDATE_RESULT}" = "skipped" ]; then
+            if [ "${BROWSER_RESULT}" = "skipped" ]; then
+              exit 0
+            fi
+          fi
+          echo "Validate: ${VALIDATE_RESULT}" >&2
+          echo "Browser matrix: ${BROWSER_RESULT}" >&2
+          exit 1
