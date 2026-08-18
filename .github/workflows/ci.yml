@@ -130,8 +130,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install browser and system dependencies
-        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+      - name: Install browser
+        run: pnpm exec playwright install ${{ matrix.browser }}
 
       - name: Generate package metadata
         run: pnpm generate:package-metadata
